@@ -1,0 +1,74 @@
+# Optional overlay: Traefik reverse proxy + TLS for the UI.
+# Usage: docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
+
+services:
+  traefik:
+    image: traefik:v3.6
+    container_name: wg-traefik
+    restart: always
+    command:
+      - "--ping=true"
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
+      - "--accesslog=true"
+      - "--api.dashboard=true"
+
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+
+      - "--entrypoints.unsecure.address=:80"
+      - "--entrypoints.unsecure.http.redirections.entryPoint.to=default"
+      - "--entrypoints.unsecure.http.redirections.entryPoint.scheme=https"
+
+      - "--entrypoints.default.address=:443"
+      - "--entrypoints.default.http.tls=true"
+
+      - "--certificatesresolvers.default.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.default.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.default.acme.dnschallenge=true"
+      - "--certificatesresolvers.default.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.default.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+    # Host network: traefik binds :80/:443 directly, reaches containers via the bridge.
+    network_mode: host
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+    environment:
+      CF_API_EMAIL: ${CF_API_EMAIL}
+      CF_API_KEY: ${CF_API_KEY}
+      # Recommended instead of the global key:
+      # CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefikapi.rule=PathPrefix(`/api/`) && HeadersRegexp(`Referer`, `^https?:\\/\\/.+\\/traefik\\/dashboard\\/`)"
+      - "traefik.http.routers.traefikapi.entrypoints=default"
+      - "traefik.http.routers.traefikapi.service=api@internal"
+      - "traefik.http.routers.traefikapi.middlewares=traefik-auth"
+
+      - "traefik.http.routers.traefikdashboard.rule=PathPrefix(`/traefik/dashboard/`)"
+      - "traefik.http.routers.traefikdashboard.priority=500"
+      - "traefik.http.routers.traefikdashboard.entrypoints=default"
+      - "traefik.http.routers.traefikdashboard.service=api@internal"
+      - "traefik.http.routers.traefikdashboard.middlewares=traefik-auth,traefik-stripprefix"
+
+      - "traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_USERS}"
+    healthcheck:
+      test: ["CMD-SHELL", "traefik healthcheck --ping"]
+      start_period: 5s
+      interval: 5s
+      retries: 30
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Routing labels for the UI go on `wireguard` because wireguard-ui shares its netns.
+  # Labels are merged by key with the base file, ofelia labels stay intact.
+  wireguard:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wg-ui.entrypoints=default"
+      - "traefik.http.routers.wg-ui.rule=Host(`${WG_HOST}`)"
+      - "traefik.http.routers.wg-ui.tls.certresolver=default"
+      - "traefik.http.services.wg-ui.loadbalancer.server.port=5000"
