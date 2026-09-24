@@ -21,7 +21,7 @@ Services:
 | `wireguard`    | `linuxserver/wireguard`          | base | The VPN server. `PEERS=0`, peers are managed by the UI. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). |
 | `wireguard-ui` | `ngoduykhanh/wireguard-ui`       | base | Web UI on port 5000. Runs with `network_mode: service:wireguard`, i.e. inside the wireguard container's network namespace. |
 | `ofelia`       | `mcuadros/ofelia`                | base | Cron-in-docker. Every minute runs `scripts/wg-sync.sh` inside `wireguard`: `wg syncconf` from the UI-written `wg0.conf`, then adds missing kernel routes for peer AllowedIPs. |
-| `traefik`      | `traefik:v3.6`                   | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (Cloudflare DNS challenge). Exposes its dashboard under `/traefik/dashboard/` behind basic auth. |
+| `traefik`      | `traefik:v3.6`                   | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Exposes its dashboard under `/traefik/dashboard/` behind basic auth. |
 
 ## Non-obvious design decisions — do not "fix" these
 
@@ -59,8 +59,9 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
 - `WG_PORT` — UDP port, used for `SERVERPORT` and the published port. Change in one place.
 - `WGUI_DEFAULT_CLIENT_ALLOWED_IPS` — default AllowedIPs for new peers. Currently routes only the
   VPN subnet and a LAN, not `0.0.0.0/0`.
-- `CF_API_KEY` / `CF_API_EMAIL` — Cloudflare global key for the DNS challenge. Prefer switching to
-  `CF_DNS_API_TOKEN` (commented out in compose) when rotating credentials.
+- `ACME_EMAIL` — Let's Encrypt account email. Certificates are issued via HTTP-01, so port 80
+  must be publicly reachable and `WG_HOST` must resolve to this host. Wildcards are not possible
+  with HTTP-01; switch to a DNS challenge if that is ever needed.
 - `TRAEFIK_DASHBOARD_USERS` — htpasswd line. If using bcrypt/md5, escape `$` as `$$`.
 - `TELEGRAM_TOKEN` — for the UI's Telegram bot that hands out configs.
 

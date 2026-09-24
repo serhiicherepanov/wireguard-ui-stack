@@ -7,7 +7,7 @@ Two compose files:
   and adds kernel routes for new peer AllowedIPs). UI is bound to
   `$WGUI_BIND:$WGUI_PORT` (default `127.0.0.1:5000`).
 - `docker-compose.traefik.yaml` — optional overlay: Traefik on host network, :80/:443,
-  Let's Encrypt via Cloudflare DNS challenge, routes `https://$WG_HOST` to the UI.
+  Let's Encrypt via HTTP-01 challenge, routes `https://$WG_HOST` to the UI.
 
 ## Run
 
@@ -26,6 +26,9 @@ Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env
 Changes to peers and their AllowedIPs apply within a minute without a restart. Changes to the
 server `Address`, `ListenPort` or `PostUp`/`PostDown` rules still need
 `docker compose restart wireguard`.
+
+HTTP-01 requires port 80 to be reachable from the internet on this host and `$WG_HOST` to
+resolve to it. No DNS provider credentials are needed.
 
 ## State
 

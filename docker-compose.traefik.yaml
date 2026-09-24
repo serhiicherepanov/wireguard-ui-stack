@@ -1,4 +1,4 @@
-# Optional overlay: Traefik reverse proxy + TLS for the UI.
+# Optional overlay: Traefik reverse proxy + TLS (Let's Encrypt, HTTP-01) for the UI.
 # Usage: docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 
 services:
@@ -22,21 +22,17 @@ services:
       - "--entrypoints.default.address=:443"
       - "--entrypoints.default.http.tls=true"
 
+      # ACME via HTTP-01: port 80 must be reachable from the internet and DNS must point here.
+      # Traefik serves /.well-known/acme-challenge/ on :80 before the HTTPS redirect kicks in.
       - "--certificatesresolvers.default.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.default.acme.storage=/letsencrypt/acme.json"
-      - "--certificatesresolvers.default.acme.dnschallenge=true"
-      - "--certificatesresolvers.default.acme.dnschallenge.provider=cloudflare"
-      - "--certificatesresolvers.default.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--certificatesresolvers.default.acme.httpchallenge=true"
+      - "--certificatesresolvers.default.acme.httpchallenge.entrypoint=unsecure"
     # Host network: traefik binds :80/:443 directly, reaches containers via the bridge.
     network_mode: host
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"
-    environment:
-      CF_API_EMAIL: ${CF_API_EMAIL}
-      CF_API_KEY: ${CF_API_KEY}
-      # Recommended instead of the global key:
-      # CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefikapi.rule=PathPrefix(`/api/`) && HeadersRegexp(`Referer`, `^https?:\\/\\/.+\\/traefik\\/dashboard\\/`)"
