@@ -33,7 +33,7 @@ Services:
 - **The image is built, not pulled.** The fork's CI pushes to `ngoduykhanh/wireguard-ui` only
   (it has no own registry), and the fork's `Dockerfile` is stale (`golang:1.21` vs
   `go 1.25` in `go.mod`), so our `Dockerfile` re-implements it with a current toolchain and
-  fetches sources with `ADD <git-url>#<ref>`. `.dockerignore` excludes everything but the
+  fetches sources with a shallow `git fetch` (works with the legacy builder too). `.dockerignore` excludes everything but the
   Dockerfile so `.env`, keys and the DB never enter the build context. Bump `WGUI_FORK_REF`
   to upgrade; keep it a full sha or tag.
 - **Lifecycle env combination** in the base file:

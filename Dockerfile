@@ -4,7 +4,8 @@
 # go >= 1.25, so `docker build <git-url>` fails. This file mirrors the fork's Dockerfile
 # (same asset layout, same init.sh entrypoint) with the toolchain bumped.
 #
-# Build context is this directory (see .dockerignore); the sources are fetched by ADD.
+# Build context is this directory (see .dockerignore); the sources are fetched with git,
+# which works with both BuildKit and the legacy builder (ADD <git-url> does not).
 
 ARG GO_IMAGE=golang:1.25-alpine
 ARG RUNTIME_IMAGE=alpine:3.22
@@ -17,12 +18,16 @@ ARG APP_VERSION=dev
 ARG BUILD_TIME
 ARG GIT_COMMIT
 
-RUN apk add --update --no-cache npm yarn
+RUN apk add --update --no-cache git npm yarn
 
 WORKDIR /build
 
-# BuildKit fetches the git ref directly; no git clone layer to cache-bust.
-ADD ${WGUI_FORK_REPO}#${WGUI_FORK_REF} /build
+# Shallow fetch of exactly one ref (sha, tag or branch all work with GitHub).
+RUN git init -q . && \
+    git remote add origin "${WGUI_FORK_REPO}" && \
+    git fetch -q --depth 1 origin "${WGUI_FORK_REF}" && \
+    git checkout -q FETCH_HEAD && \
+    rm -rf .git
 
 # Frontend deps (admin-lte + plugins), same layout as the fork's Dockerfile.
 RUN yarn install --pure-lockfile --production && yarn cache clean && \
