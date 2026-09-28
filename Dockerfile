@@ -45,6 +45,10 @@ RUN yarn install --pure-lockfile --production && yarn cache clean && \
           assets/plugins/ && \
     cp -r custom/ assets/
 
+# The fork's templates reference /static/wireguard.svg but ship no such file (404, broken
+# logo on login page and sidebar). Provide it; assets/ is embedded into the binary below.
+COPY assets/wireguard.svg assets/wireguard.svg
+
 RUN CGO_ENABLED=0 go build \
       -ldflags="-X 'main.appVersion=${APP_VERSION}' -X 'main.buildTime=${BUILD_TIME}' -X 'main.gitCommit=${GIT_COMMIT}'" \
       -a -o wg-ui .

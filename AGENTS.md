@@ -15,7 +15,9 @@ passkeys, multi-user). WireGuard itself runs **inside the same container** via `
 - `docker-compose.yaml` — base stack, no reverse proxy. Always required.
 - `docker-compose.traefik.yaml` — optional overlay adding Traefik and the routing labels.
   Enabled via `COMPOSE_FILE=docker-compose.yaml:docker-compose.traefik.yaml` in `.env`.
-- `Dockerfile` + `.dockerignore` — builds the fork from git at `WGUI_FORK_REF`.
+- `Dockerfile` + `.dockerignore` + `entrypoint.sh` — builds the fork from git at `WGUI_FORK_REF`.
+- `assets/wireguard.svg` — logo the fork's templates reference but do not ship; baked into the
+  image at build time (embedded `assets/` dir).
 - `.env` / `.env.example` — all configuration.
 
 Services:
