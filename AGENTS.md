@@ -7,69 +7,80 @@ Guidance for AI agents and humans working in this repo.
 A standalone Docker Compose stack: WireGuard VPN with a web UI, fronted by Traefik.
 It was split out of `../docker-compose-openvpn-admin` and is meant to run on its own host.
 
+The UI is the **Skyline-core fork of wireguard-ui** (v2 UI, Status/Dashboard/Traffic pages,
+passkeys, multi-user). WireGuard itself runs **inside the same container** via `wg-quick`.
+
 ## Files
 
 - `docker-compose.yaml` — base stack, no reverse proxy. Always required.
 - `docker-compose.traefik.yaml` — optional overlay adding Traefik and the routing labels.
   Enabled via `COMPOSE_FILE=docker-compose.yaml:docker-compose.traefik.yaml` in `.env`.
+- `Dockerfile` + `.dockerignore` — builds the fork from git at `WGUI_FORK_REF`.
 - `.env` / `.env.example` — all configuration.
 
 Services:
 
-| Service        | Image                            | File | Role |
-|----------------|----------------------------------|------|------|
-| `wireguard`    | `linuxserver/wireguard`          | base | The VPN server. `PEERS=0`, peers are managed by the UI. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). |
-| `wireguard-ui` | `ngoduykhanh/wireguard-ui`       | base | Web UI on port 5000. Runs with `network_mode: service:wireguard`, i.e. inside the wireguard container's network namespace. |
-| `ofelia`       | `mcuadros/ofelia`                | base | Cron-in-docker. Every minute runs `scripts/wg-sync.sh` inside `wireguard`: `wg syncconf` from the UI-written `wg0.conf`, then adds missing kernel routes for peer AllowedIPs. |
-| `traefik`      | `traefik:v3.6`                   | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Exposes its dashboard under `/traefik/dashboard/` behind basic auth. |
+| Service        | Image                        | File    | Role |
+|----------------|------------------------------|---------|------|
+| `wireguard`    | built locally (`Dockerfile`) | base    | UI on port 5000 **and** the WireGuard tunnel (`wg-quick up` on start). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). |
+| `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. |
 
 ## Non-obvious design decisions — do not "fix" these
 
-- **Traefik labels for the UI are on the `wireguard` service, not on `wireguard-ui`.**
-  Because the UI shares the wireguard netns, Traefik must route to the wireguard container's IP.
-  Moving the labels to `wireguard-ui` breaks routing. They live in `docker-compose.traefik.yaml`
-  under `services.wireguard.labels` and are merged by key with the ofelia labels from the base
-  file. Keep the base file free of any `traefik.*` labels.
-- **The UI port is published in the base file on `wireguard`** (`$WGUI_BIND:$WGUI_PORT:5000`),
-  bound to `127.0.0.1` by default so the stack is usable without Traefik. Do not set
-  `WGUI_BIND=0.0.0.0` on a public host when the traefik overlay is active.
-- **Traefik uses `network_mode: host`.** That is why there is no `ports:` section on it. The host
-  can reach the compose bridge network, so the docker provider still works. Do not add `ports:`.
-- **`wireguard-ui` has no `ports:` and no network** — it cannot, because of `network_mode: service:`.
-- **ofelia's job** is defined as labels on `wireguard` (`ofelia.job-exec.wg-sync.*`). It executes
-  `scripts/wg-sync.sh` (mounted at `/scripts`) inside the wireguard container, which has `wg`,
-  `wg-quick` and `ip`.
-- **Why the sync script adds routes.** `wg syncconf` only updates the kernel cryptokey table.
-  Kernel routes (`ip route add <cidr> dev wg0`) are added by `wg-quick up` only, so a subnet
-  added to a peer's AllowedIPs in the UI would be unreachable until a restart. The script
-  mirrors wg-quick's `add_route` logic and deliberately skips `/0`. It does not remove stale
-  routes, and it does not re-apply `PostUp`/`PostDown`, `Address` or `ListenPort` changes;
-  those still need `docker compose restart wireguard`.
-- **`depends_on` with `condition: service_healthy`** on `wireguard-ui` matters: the UI reads
-  `/etc/wireguard/wg0.conf`, which linuxserver/wireguard generates on first boot.
-- The `dynamic/` file provider from the original project was intentionally left out. Everything
-  is configured via docker labels.
+- **Single container on purpose.** Peer status in the UI needs netlink access to `wg0`
+  (wgctrl) plus `CAP_NET_ADMIN`. Splitting the tunnel into another container brings back the
+  `network_mode: service:` dance and a cron sidecar to sync routes. Keep it in one.
+- **The image is built, not pulled.** The fork's CI pushes to `ngoduykhanh/wireguard-ui` only
+  (it has no own registry), and the fork's `Dockerfile` is stale (`golang:1.21` vs
+  `go 1.25` in `go.mod`), so our `Dockerfile` re-implements it with a current toolchain and
+  fetches sources with `ADD <git-url>#<ref>`. `.dockerignore` excludes everything but the
+  Dockerfile so `.env`, keys and the DB never enter the build context. Bump `WGUI_FORK_REF`
+  to upgrade; keep it a full sha or tag.
+- **Lifecycle env combination** in the base file:
+  `WGUI_MANAGE_START=true` (init.sh does `wg-quick up/down` with the container),
+  `WGUI_MANAGE_RESTART=false` (the inotify restarter would double-restart),
+  `WGUI_ALLOW_WG_QUICK=true` (Apply config does `wg-quick down/up`, which is what adds kernel
+  routes for new AllowedIPs; also enables Stop/Start/Restart on the Server page),
+  `WGUI_WG_RESTART_VIA_SYSTEMD=false`, `WGUI_WG_SYNCCONF_AFTER_APPLY=true` (fallback when the
+  UI is asked to apply without restart), `WGUI_ALLOW_SYSCTL_IP_FORWARD=false` (forwarding is set
+  by compose `sysctls:`). Changing any of these changes how config reaches the kernel.
+- **`WGUI_SERVER_*`, `WGUI_ENDPOINT_ADDRESS`, `WGUI_USERNAME/PASSWORD` are first-run defaults
+  only.** Once `wireguard/ui/db` exists they are ignored; edit those on the Server page.
+- **Traefik labels are on `wireguard`** in the overlay file. Keep the base file free of
+  `traefik.*` labels. The overlay also sets `WGUI_WEBAUTHN_RP_ID/ORIGINS` to `WG_HOST` because
+  passkeys need a fixed RP ID behind a proxy.
+- **The UI port is published in the base file**, bound to `127.0.0.1` by default so the stack is
+  usable without Traefik. Do not set `WGUI_BIND=0.0.0.0` on a public host when the traefik
+  overlay is active.
+- **Traefik uses `network_mode: host`.** That is why there is no `ports:` section on it. Do not
+  add `ports:`.
+- **Volume paths are inherited from the old two-container layout** (`wireguard/config/wg_confs`
+  for `wg0.conf`, `wireguard/ui/db` for the DB) so existing installs need no migration.
+  `wireguard/config/{server,templates,coredns}` are dead leftovers of linuxserver/wireguard.
+- The host kernel must provide the `wireguard` module (mainline since 5.6). The container does
+  not modprobe anything.
 
 ## Configuration
 
 All configuration is in `.env` (gitignored). `.env.example` lists every variable.
 
-- `WG_HOST` — used both as the WireGuard endpoint (`SERVERURL`) and the Traefik `Host()` rule
-  for the UI. Keep them the same unless you have a reason to split.
-- `WG_PORT` — UDP port, used for `SERVERPORT` and the published port. Change in one place.
+- `WG_HOST` — WireGuard endpoint for clients (first-run default) and the Traefik `Host()` rule.
+- `WG_PORT` — UDP port: published port, first-run listen port, endpoint port. Change in one
+  place, then also on the Server page for an existing DB.
+- `WG_SERVER_ADDRESS`, `WG_POST_UP`, `WG_POST_DOWN` — first-run defaults for the interface.
 - `WGUI_DEFAULT_CLIENT_ALLOWED_IPS` — default AllowedIPs for new peers. Currently routes only the
-  VPN subnet and a LAN, not `0.0.0.0/0`.
-- `ACME_EMAIL` — Let's Encrypt account email. Certificates are issued via HTTP-01, so port 80
-  must be publicly reachable and `WG_HOST` must resolve to this host. Wildcards are not possible
-  with HTTP-01; switch to a DNS challenge if that is ever needed.
+  VPN subnet, not `0.0.0.0/0`.
+- `WGUI_FORK_REF` — commit sha/tag of the fork to build.
+- `ACME_EMAIL` — Let's Encrypt account email. HTTP-01: port 80 must be publicly reachable and
+  `WG_HOST` must resolve here. No wildcards.
 - `TRAEFIK_DASHBOARD_USERS` — htpasswd line. If using bcrypt/md5, escape `$` as `$$`.
 - `TELEGRAM_TOKEN` — for the UI's Telegram bot that hands out configs.
 
 ## State on disk (all gitignored)
 
-- `wireguard/config/` — server keys (`server/privatekey-server`), templates, `wg_confs/wg0.conf`.
-  Losing this means all peers must be re-issued.
-- `wireguard/ui/db/` — UI users, clients, settings (JSON files).
+- `wireguard/ui/db/` — UI users, clients, **server keypair**, settings (JSON). Source of truth;
+  losing this means all peers must be re-issued.
+- `wireguard/config/wg_confs/wg0.conf` — rendered from the DB by the UI. Regenerable.
 - `letsencrypt/acme.json` — certificates. Must be mode `600` or Traefik refuses to start.
 
 ## Common tasks
@@ -77,8 +88,9 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
 ```
 docker compose -f docker-compose.yaml config -q   # base only
 docker compose config -q                          # base + traefik (COMPOSE_FILE from .env)
+docker compose build                              # (re)build the fork image
 docker compose up -d
-docker compose logs -f traefik wireguard wireguard-ui
+docker compose logs -f wireguard traefik
 docker compose exec wireguard wg show
 ```
 
@@ -86,10 +98,12 @@ docker compose exec wireguard wg show
 
 - After touching either compose file, validate both variants:
   `docker compose -f docker-compose.yaml config -q` and `docker compose config -q`.
+- After touching `Dockerfile`, run `docker compose -f docker-compose.yaml build`.
 - Never commit `.env`, `wireguard/`, or `letsencrypt/`. Never print secret values from `.env`
-  into chat, logs, or commit messages.
-- Do not change service names, `container_name`s, or volume paths without a migration note:
-  `wireguard-ui`'s DB and wireguard's config are path-bound.
+  or `wireguard/ui/db/server/keypair.json` into chat, logs, or commit messages.
+- Do not change service names, `container_name`s, or volume paths without a migration note
+  (the service was `wireguard-ui` until Sep 2026; the volume paths still predate that):
+  the DB and `wg0.conf` are path-bound.
 - Keep new settings in `.env` + `.env.example`, not hardcoded in compose.
 - This stack and `../docker-compose-openvpn-admin` both run Traefik on the host network. They
   cannot run on the same machine at the same time.

@@ -1,0 +1,5 @@
+# The build context is only the Dockerfile; sources come from git via ADD.
+# Never ship .env, keys, certs or the UI DB into the build.
+*
+!Dockerfile
+!entrypoint.sh

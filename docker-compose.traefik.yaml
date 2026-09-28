@@ -59,9 +59,11 @@ services:
         max-size: "50m"
         max-file: "3"
 
-  # Routing labels for the UI go on `wireguard` because wireguard-ui shares its netns.
-  # Labels are merged by key with the base file, ofelia labels stay intact.
   wireguard:
+    environment:
+      # Passkeys (WebAuthn) need a fixed RP ID / origin behind the proxy.
+      - WGUI_WEBAUTHN_RP_ID=${WG_HOST}
+      - WGUI_WEBAUTHN_RP_ORIGINS=https://${WG_HOST}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.wg-ui.entrypoints=default"

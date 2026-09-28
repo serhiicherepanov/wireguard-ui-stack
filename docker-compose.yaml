@@ -1,35 +1,77 @@
-# Base stack: WireGuard + WireGuard-UI + ofelia. No reverse proxy.
+# Base stack: a single container running both WireGuard (wg-quick) and the
+# Skyline-core fork of wireguard-ui. No reverse proxy.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
+#
+# The fork does not publish its own image, so it is built locally (see Dockerfile) from
+# its git repo at a pinned commit (WGUI_FORK_REF). Rebuild after bumping the ref:
+#   docker compose build --pull && docker compose up -d
 
 services:
   wireguard:
-    image: linuxserver/wireguard:latest
+    build:
+      context: .
+      args:
+        WGUI_FORK_REPO: "${WGUI_FORK_REPO:-https://github.com/Skyline-core/wireguard-ui.git}"
+        WGUI_FORK_REF: "${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
+        GIT_COMMIT: "${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
+        APP_VERSION: "skyline-${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
+    image: wireguard-ui-skyline:local
     container_name: wireguard
     restart: always
+    # NET_ADMIN: wg-quick / wg syncconf / ip route inside the container and
+    # wgctrl (netlink) for the peer status pages.
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=${TZ:-Asia/Tbilisi}
-      - SERVERURL=${WG_HOST}
-      - SERVERPORT=${WG_PORT:-51821}
-      # UI manages peers; keep 0
-      - PEERS=0
-      - INTERNAL_SUBNET=${WG_SUBNET:-10.13.13.0}
-    volumes:
-      - ./wireguard/config:/config
-      - ./scripts:/scripts:ro
-      - /lib/modules:/lib/modules:ro
     sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - TZ=${TZ:-Asia/Tbilisi}
+      - BIND_ADDRESS=0.0.0.0:5000
+      - SESSION_SECRET=${WGUI_SESSION_SECRET:-}
+      - WGUI_LOG_LEVEL=${WGUI_LOG_LEVEL:-INFO}
+
+      # --- WireGuard lifecycle (all handled in-container, no cron/sidecar) ---
+      # init.sh runs `wg-quick up` on container start and `wg-quick down` on stop.
+      - WGUI_MANAGE_START=true
+      # Do NOT also enable the inotify-based restart: "Apply config" in the UI
+      # already restarts/syncs the tunnel (see WGUI_ALLOW_WG_QUICK below).
+      - WGUI_MANAGE_RESTART=false
+      # "Apply config" runs `wg-quick down/up`, so new peer AllowedIPs get their
+      # kernel routes. Also enables Stop/Start/Restart on the Server page.
+      - WGUI_ALLOW_WG_QUICK=true
+      # No systemd in the container; go straight to wg-quick.
+      - WGUI_WG_RESTART_VIA_SYSTEMD=false
+      # Fallback when Apply is called with restart_wireguard=false.
+      - WGUI_WG_SYNCCONF_AFTER_APPLY=true
+      # ip_forward is set via `sysctls:` above; do not let the UI toggle it.
+      - WGUI_ALLOW_SYSCTL_IP_FORWARD=false
+
+      # --- Defaults used only when the DB is initialised for the first time ---
+      - WGUI_CONFIG_FILE_PATH=/etc/wireguard/wg0.conf
+      - WGUI_ENDPOINT_ADDRESS=${WG_HOST}:${WG_PORT:-51821}
+      - WGUI_SERVER_LISTEN_PORT=${WG_PORT:-51821}
+      - WGUI_SERVER_INTERFACE_ADDRESSES=${WG_SERVER_ADDRESS:-10.13.13.1/24}
+      - WGUI_SERVER_POST_UP_SCRIPT=${WG_POST_UP:-}
+      - WGUI_SERVER_POST_DOWN_SCRIPT=${WG_POST_DOWN:-}
+      - WGUI_DEFAULT_CLIENT_ALLOWED_IPS=${WGUI_DEFAULT_CLIENT_ALLOWED_IPS:-10.13.13.0/24}
+      - WGUI_DNS=${WGUI_DNS:-1.1.1.1}
+      - WGUI_USERNAME=${WGUI_USERNAME:-admin}
+      - WGUI_PASSWORD=${WGUI_PASSWORD:-admin}
+
+      # --- Telegram bot ---
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_ALLOW_CONF_REQUEST=${TELEGRAM_ALLOW_CONF_REQUEST:-true}
+    volumes:
+      # UI state: users, clients, server keypair, settings. Source of truth.
+      - ./wireguard/ui/db:/app/db
+      # wg0.conf rendered by the UI; wg-quick reads it from here.
+      - ./wireguard/config/wg_confs:/etc/wireguard
     ports:
       - "${WG_PORT:-51821}:${WG_PORT:-51821}/udp"
-      # UI lives in this container's netns. Bound to localhost by default;
-      # with the traefik override the proxy handles public access.
+      # UI. Bound to localhost by default; with the traefik overlay the proxy
+      # handles public access.
       - "${WGUI_BIND:-127.0.0.1}:${WGUI_PORT:-5000}:5000"
     logging:
       driver: "json-file"
@@ -37,59 +79,8 @@ services:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD-SHELL", "wg show wg0 >/dev/null 2>&1 && ip link show wg0 >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 3s
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/login >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
       retries: 5
-      start_period: 20s
-    labels:
-      # ofelia: re-sync live wg0 with the conf written by the UI and add missing
-      # kernel routes for peer AllowedIPs (see scripts/wg-sync.sh).
-      - "ofelia.enabled=true"
-      - "ofelia.job-exec.wg-sync.schedule=@every 1m"
-      - "ofelia.job-exec.wg-sync.command=sh /scripts/wg-sync.sh"
-
-  wireguard-ui:
-    image: ngoduykhanh/wireguard-ui:latest
-    container_name: wireguard-ui
-    restart: always
-    depends_on:
-      wireguard:
-        condition: service_healthy
-    environment:
-      - TZ=${TZ:-Asia/Tbilisi}
-      # linuxserver wg conf folder is mounted to /etc/wireguard
-      - WIREGUARD_CONF_PATH=/etc/wireguard/wg0.conf
-      - WGUI_DEFAULT_CLIENT_ALLOWED_IPS=${WGUI_DEFAULT_CLIENT_ALLOWED_IPS:-10.13.13.0/24}
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - TELEGRAM_ALLOW_CONF_REQUEST=${TELEGRAM_ALLOW_CONF_REQUEST:-true}
-      # Optional:
-      # - SESSION_SECRET=${WGUI_SESSION_SECRET}
-      # - WGUI_USERNAME=${WGUI_USERNAME}
-      # - WGUI_PASSWORD=${WGUI_PASSWORD}
-    volumes:
-      - ./wireguard/config/wg_confs:/etc/wireguard
-      - ./wireguard/ui/db:/app/db
-    # Shares the network namespace with wireguard so it can manage wg0 directly.
-    network_mode: "service:wireguard"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/ >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 20s
-
-  ofelia:
-    image: mcuadros/ofelia:latest
-    container_name: ofelia
-    restart: always
-    depends_on:
-      - wireguard
-    command: daemon --docker
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      start_period: 30s
