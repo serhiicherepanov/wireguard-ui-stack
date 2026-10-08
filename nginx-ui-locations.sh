@@ -1,8 +1,7 @@
 #!/bin/bash
 # my_init.d step (runs before runit starts nginx): expose wireguard-ui under BASE_PATH on the
 # Seafile nginx (:80), so the container's single HTTP port serves both:  / -> Seafile,
-# $BASE_PATH -> UI. Traefik sends the whole domain here; the same split works for direct
-# access over the tunnel (http://<wg address>/wg) and without Traefik.
+# $BASE_PATH -> UI. The reverse proxy on the host sends the whole domain here.
 # Seafile's server block includes this file (the include is added to the image's
 # seafile.nginx.conf.template in the Dockerfile). Regenerated on every start, so changing
 # WGUI_BASE_PATH in .env needs no edit of the persisted seafile.nginx.conf.

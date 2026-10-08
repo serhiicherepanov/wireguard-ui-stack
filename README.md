@@ -51,7 +51,6 @@ flowchart LR
     nginx --> seafile
     nginx --> ui
     peer -- "UDP $WG_PORT" --> wg0
-    peer -. "http://10.13.13.1/ and /wg<br/>inside the tunnel" .-> nginx
     seafile --> db
     seafile --> memcached
     ui -. "wgctrl, wg-quick, wg0.conf" .-> wg0
@@ -84,10 +83,10 @@ Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env
 `X-Forwarded-Proto`, with no body-size limit and long read timeouts for `/seafhttp`, and
 set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
 
-- Seafile: `https://$WG_HOST/` (with traefik) or `http://<wg address>/` over the tunnel.
+- Seafile: `https://$WG_HOST/`.
   First start takes a couple of minutes (DB setup); watch `docker compose logs -f wireguard`.
-- UI: `https://$WG_HOST/wg` (behind a proxy), `http://<wg address>/wg` (through the tunnel) or
-  `http://127.0.0.1:$HTTP_PORT/wg` (on the host). The prefix is `WGUI_BASE_PATH`.
+- UI: `https://$WG_HOST/wg`, or `http://127.0.0.1:$HTTP_PORT/wg` on the host itself. The
+  prefix is `WGUI_BASE_PATH`.
 - Traefik dashboard: `https://$WG_HOST/traefik/dashboard/` (basic auth from `TRAEFIK_DASHBOARD_USERS`)
 - WireGuard: `$WG_HOST:$WG_PORT/udp`
 
@@ -99,9 +98,8 @@ set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
   `wireguard` image (see `Dockerfile`) instead of a separate container.
 - One domain for both: Traefik hands the whole domain to the nginx inside the container,
   which serves Seafile at `/` and proxies `/wg` to the UI. Seafile itself cannot live under a
-  sub-path, which is why the UI is the one that moves. The same nginx split works over the
-  tunnel without Traefik. Passkeys need HTTPS and therefore only work via the Traefik URL;
-  password login works everywhere.
+  sub-path, which is why the UI is the one that moves. VPN peers use the same public URLs;
+  nothing is served to them specially over the tunnel. Passkeys need HTTPS.
 - TLS is terminated by Traefik. The overlay sets `FORCE_HTTPS_IN_CONF=true`, and the image
   patches Seafile's first-run bootstrap so that `seahub_settings.py` gets an https
   `SERVICE_URL` (the stock image writes http there despite the flag) and

@@ -7,7 +7,6 @@
 #   HTTP_BIND=127.0.0.1  -> only a web server on this host can reach it (TLS ends there)
 #   HTTP_BIND=0.0.0.0    -> plain HTTP straight to the world
 #   traefik overlay      -> reaches :80 over the bridge, bind address irrelevant
-# Over the tunnel: http://<wg address>/ and /wg.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #

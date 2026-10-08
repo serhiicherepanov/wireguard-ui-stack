@@ -73,7 +73,8 @@ Services:
   nginx: Traefik has a single router that sends the whole domain to `:80`. The Dockerfile adds
   `include /etc/nginx/wireguard-ui.locations;` to the image's `seafile.nginx.conf.template`
   and `nginx-ui-locations.sh` (my_init.d, before runit starts nginx) renders that file from
-  `BASE_PATH` on every start, so the same split works over the tunnel and without Traefik.
+  `BASE_PATH` on every start. Peers reach the web like everyone else, via the public URL;
+  there is no tunnel-side web entry by design.
   The location forwards Traefik's `X-Forwarded-Proto` to the UI instead of nginx's own
   `$scheme` (http), because passkeys compare origins. Seafile
   persists the rendered server block in `seafile/data/nginx/conf/seafile.nginx.conf`; an
