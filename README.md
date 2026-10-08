@@ -31,8 +31,7 @@ flowchart LR
     end
 
     subgraph host[Docker host]
-        traefik["traefik (overlay, host network)<br/>:80 → :443, Let's Encrypt HTTP-01"]
-        proxy["or: your own reverse proxy on the host<br/>(TLS terminated there)"]
+        proxy["reverse proxy / LB on the host, TLS ends here<br/>traefik from the overlay (:80 → :443, Let's Encrypt)<br/>or any other"]
 
         subgraph wgc["wireguard container · ghcr.io/serhiicherepanov/wireguard-ui-stack"]
             nginx["nginx :80<br/>/ → Seafile · /wg → UI"]
@@ -47,10 +46,8 @@ flowchart LR
         end
     end
 
-    browser -- "https://$WG_HOST" --> traefik
     browser -- "https://$WG_HOST" --> proxy
-    traefik -- "bridge network → :80" --> nginx
-    proxy -- "published $HTTP_BIND:$HTTP_PORT<br/>(default 127.0.0.1:5000, host-local)" --> nginx
+    proxy -- "traefik: bridge network → :80<br/>other LB: published $HTTP_BIND:$HTTP_PORT (host-local)" --> nginx
     nginx --> seafile
     nginx --> ui
     peer -- "UDP $WG_PORT" --> wg0
