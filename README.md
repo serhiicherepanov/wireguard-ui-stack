@@ -31,7 +31,7 @@ flowchart LR
     end
 
     subgraph host[Docker host]
-        proxy["reverse proxy / LB on the host, TLS ends here<br/>traefik from the overlay (:80 → :443, Let's Encrypt)<br/>or any other"]
+        proxy["reverse proxy / LB on the host<br/>TLS ends here"]
 
         subgraph wgc["wireguard container · ghcr.io/serhiicherepanov/wireguard-ui-stack"]
             nginx["nginx :80<br/>/ → Seafile · /wg → UI"]
@@ -47,7 +47,7 @@ flowchart LR
     end
 
     browser -- "https://$WG_HOST" --> proxy
-    proxy -- "traefik: bridge network → :80<br/>other LB: published $HTTP_BIND:$HTTP_PORT (host-local)" --> nginx
+    proxy -- "127.0.0.1:$HTTP_PORT (published, host-local) → :80" --> nginx
     nginx --> seafile
     nginx --> ui
     peer -- "UDP $WG_PORT" --> wg0
@@ -57,9 +57,10 @@ flowchart LR
 ```
 
 The only published web port is the container's nginx on `$HTTP_BIND:$HTTP_PORT` (default
-`127.0.0.1:5000`). Without the Traefik overlay, point your own TLS-terminating proxy at it
-and set `SEAFILE_FORCE_HTTPS=true` before the first start; `HTTP_BIND=0.0.0.0` exposes it as
-plain HTTP instead.
+`127.0.0.1:5000`). The reverse proxy on the host points at it and sets
+`SEAFILE_FORCE_HTTPS=true` before the first start; `HTTP_BIND=0.0.0.0` exposes it as plain
+HTTP instead. The optional Traefik overlay is one such proxy; it reaches the container's :80
+over the Docker bridge instead of the published port.
 
 Volumes: `wireguard/ui/db` (UI DB, server keypair) and `wireguard/config/wg_confs` (`wg0.conf`)
 into `wireguard`; `seafile/data` (`/shared`) into `wireguard`; `seafile/db` into `seafile-db`;
