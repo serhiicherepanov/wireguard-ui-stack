@@ -6,7 +6,10 @@ on its Status, Dashboard and Traffic pages. Seafile sits in the same network nam
 can be served **only to VPN peers**: its port 80 is firewalled to `wg0` and never published.
 
 The UI is the [Skyline-core fork of wireguard-ui](https://github.com/Skyline-core/wireguard-ui).
-It publishes no image, so it is built locally from a pinned commit (see `Dockerfile`).
+It publishes no image, so this repo builds its own: GitHub Actions builds `Dockerfile` on
+every push to `main` and publishes `ghcr.io/serhiicherepanov/wireguard-ui-stack:latest`
+(plus a `:sha-…` tag per commit). The server pulls it; `docker compose build` still works
+for a local build.
 
 Two compose files (one service `wireguard` = tunnel + UI + Seafile, container name `wireguard`):
 
@@ -19,10 +22,14 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
 ## Run
 
 ```
-cp .env.example .env   # fill in values
-docker compose build   # builds the fork image (first time and after bumping WGUI_FORK_REF)
-docker compose up -d   # COMPOSE_FILE in .env includes the traefik overlay
+cp .env.example .env            # fill in values
+docker compose pull wireguard   # CI-built image from GHCR (or: docker compose build)
+docker compose up -d            # COMPOSE_FILE in .env includes the traefik overlay
 ```
+
+Updating to the latest build: `docker compose pull wireguard && docker compose up -d`.
+If the GHCR package is private, `docker login ghcr.io` with a token that has `read:packages`
+first.
 
 Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env`, or run
 `docker compose -f docker-compose.yaml up -d`.
@@ -73,10 +80,11 @@ resolve to it. No DNS provider credentials are needed.
 
 ## Upgrading the fork
 
-Set `WGUI_FORK_REF` in `.env` to a new commit sha or tag, then:
+Change the `WGUI_FORK_REF` default in `docker-compose.yaml` to a new commit sha or tag and push
+to `main`; CI publishes the new image. Then on the server:
 
 ```
-docker compose build --pull && docker compose up -d
+docker compose pull wireguard && docker compose up -d
 ```
 
 ## State

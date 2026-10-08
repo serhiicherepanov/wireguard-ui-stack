@@ -25,12 +25,15 @@ and so does **Seafile** (the official `seafileltd/seafile-mc` image is the runti
 - `assets/wireguard.svg` — logo the fork's templates reference but do not ship; baked into the
   image at build time (embedded `assets/` dir).
 - `.env` / `.env.example` — all configuration.
+- `.github/workflows/build-image.yml` — builds the image on every push to `main` with
+  `docker buildx bake` on `docker-compose.yaml` and pushes `ghcr.io/<owner>/<repo>:latest`
+  and `:sha-<short>`.
 
 Services:
 
 | Service        | Image                        | File    | Role |
 |----------------|------------------------------|---------|------|
-| `wireguard`    | built locally (`Dockerfile`) | base    | UI on port 5000 (under `$WGUI_BASE_PATH`), the WireGuard tunnel (`wg-quick up` on start) **and** Seafile (nginx :80 → `/` seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). Port 80 is not published and is firewalled to `wg0`. |
+| `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | UI on port 5000 (under `$WGUI_BASE_PATH`), the WireGuard tunnel (`wg-quick up` on start) **and** Seafile (nginx :80 → `/` seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). Port 80 is not published and is firewalled to `wg0`. |
 | `seafile-db`   | `mariadb:10.11`              | base    | Seafile database, `internal` network only. |
 | `seafile-memcached` | `memcached:1.6`         | base    | Seafile cache, `internal` network only, alias `memcached`. |
 | `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. Routes the UI only (`https://$WG_HOST$WGUI_BASE_PATH`, `/` redirects there), never Seafile. |
@@ -40,13 +43,18 @@ Services:
 - **Single container on purpose.** Peer status in the UI needs netlink access to `wg0`
   (wgctrl) plus `CAP_NET_ADMIN`. Splitting the tunnel into another container brings back the
   `network_mode: service:` dance and a cron sidecar to sync routes. Keep it in one.
-- **The image is built, not pulled.** The fork's CI pushes to `ngoduykhanh/wireguard-ui` only
-  (it has no own registry), and the fork's `Dockerfile` is stale (`golang:1.21` vs
-  `go 1.25` in `go.mod`), so our `Dockerfile` re-implements it with a current toolchain and
-  fetches sources with a shallow `git fetch` (works with the legacy builder too). `.dockerignore`
-  excludes everything but the Dockerfile, `entrypoint.sh` and the logo so `.env`, keys and
-  the DB never enter the build context. Bump `WGUI_FORK_REF` to upgrade; keep it a full sha
-  or tag.
+- **The image is ours, built by CI, pulled by the server.** The fork's CI pushes to
+  `ngoduykhanh/wireguard-ui` only (it has no own registry), and the fork's `Dockerfile` is
+  stale (`golang:1.21` vs `go 1.25` in `go.mod`), so our `Dockerfile` re-implements it with
+  a current toolchain and fetches sources with a shallow `git fetch` (works with the legacy
+  builder too). `.dockerignore` excludes everything but the Dockerfile, the two scripts and
+  the logo so `.env`, keys and the DB never enter the build context. GitHub Actions builds it
+  on every push to `main` via `buildx bake` **reading `docker-compose.yaml`**, so the build
+  args (the `WGUI_FORK_REF` pin, `SEAFILE_IMAGE`) have exactly one home: the compose
+  defaults. The workflow sets dummy `SEAFILE_*` values only to satisfy the `${VAR:?}`
+  checks during interpolation. `docker compose build` still works locally and produces the
+  same tag. Bump `WGUI_FORK_REF` in the compose default to upgrade; keep it a full sha or
+  tag. `WG_IMAGE` in `.env` pins the server to a specific `:sha-…` tag if wanted.
 - **Seafile runs inside the `wireguard` container, on top of the official image.** The
   requirement is "Seafile only via the VPN address". Its nginx must therefore listen in the
   network namespace that owns `wg0`, and the runtime stage of our `Dockerfile` is
@@ -162,7 +170,8 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
 ```
 docker compose -f docker-compose.yaml config -q   # base only
 docker compose config -q                          # base + traefik (COMPOSE_FILE from .env)
-docker compose build                              # (re)build the fork image
+docker compose pull wireguard                     # fetch the CI-built image
+docker compose build                              # or build it locally (same tag)
 docker compose up -d
 docker compose logs -f wireguard traefik
 docker compose exec wireguard wg show
@@ -177,7 +186,9 @@ docker compose logs -f wireguard                      # Seafile + UI + wg-quick,
 
 - After touching either compose file, validate both variants:
   `docker compose -f docker-compose.yaml config -q` and `docker compose config -q`.
-- After touching `Dockerfile`, run `docker compose -f docker-compose.yaml build`.
+- After touching `Dockerfile`, run `docker compose -f docker-compose.yaml build`. After touching
+  the `build:` section or the workflow, also dry-run what CI will do:
+  `SEAFILE_HOST=x SEAFILE_DB_ROOT_PASSWORD=x SEAFILE_ADMIN_PASSWORD=x docker buildx bake -f docker-compose.yaml --print wireguard`.
 - Never commit `.env`, `wireguard/`, `letsencrypt/` or `seafile/` contents. Never print secret
   values from `.env`, `wireguard/ui/db/server/keypair.json` or `seafile/data/seafile/conf/`
   into chat, logs, or commit messages.

@@ -9,9 +9,10 @@
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #
-# The fork does not publish its own image, so it is built locally (see Dockerfile) from
-# its git repo at a pinned commit (WGUI_FORK_REF). Rebuild after bumping the ref:
-#   docker compose build --pull && docker compose up -d
+# The image is built by GitHub Actions on every push to main (.github/workflows/build-image.yml,
+# `buildx bake` on this very file) and published to GHCR. On the server:
+#   docker compose pull wireguard && docker compose up -d
+# The build: section stays for local builds (docker compose build) and as the CI definition.
 
 services:
   wireguard:
@@ -23,7 +24,7 @@ services:
         GIT_COMMIT: "${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
         APP_VERSION: "skyline-${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
         SEAFILE_IMAGE: "${SEAFILE_IMAGE:-seafileltd/seafile-mc:11.0-latest}"
-    image: wireguard-ui-skyline:local
+    image: ${WG_IMAGE:-ghcr.io/serhiicherepanov/wireguard-ui-stack:latest}
     container_name: wireguard
     restart: always
     # my_init stops Seafile (seaf-server, seahub), nginx and the tunnel in order; the compose
