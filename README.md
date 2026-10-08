@@ -20,6 +20,46 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
   Let's Encrypt via HTTP-01 challenge, sends `https://$WG_HOST` to the container's nginx
   (Seafile at `/`, UI at `/wg`).
 
+## Services
+
+```mermaid
+flowchart LR
+    subgraph outside[Internet]
+        browser["Browser, Seafile desktop/mobile"]
+        peer["WireGuard peers"]
+    end
+
+    subgraph host[Docker host]
+        traefik["traefik (host network)<br/>:80 → :443, Let's Encrypt HTTP-01<br/>Host($WG_HOST) → :80 of wireguard"]
+
+        subgraph wgc["wireguard container · ghcr.io/serhiicherepanov/wireguard-ui-stack"]
+            nginx["nginx :80<br/>/ → Seafile · /wg → UI"]
+            seafile["Seafile 11<br/>seahub :8000 · seaf-server :8082"]
+            ui["wireguard-ui :5000<br/>BASE_PATH=/wg"]
+            wg0["wg0 (wg-quick)<br/>UDP $WG_PORT"]
+        end
+
+        subgraph backend["network seafile (internal, no egress)"]
+            db[("seafile-db<br/>mariadb:10.11")]
+            memcached["seafile-memcached<br/>memcached:1.6"]
+        end
+    end
+
+    browser -- "https://$WG_HOST" --> traefik
+    traefik -- "bridge network, plain http" --> nginx
+    nginx --> seafile
+    nginx --> ui
+    peer -- "UDP $WG_PORT" --> wg0
+    peer -. "http://10.13.13.1/ and /wg<br/>inside the tunnel" .-> nginx
+    seafile --> db
+    seafile --> memcached
+    ui -. "wgctrl, wg-quick, wg0.conf" .-> wg0
+```
+
+Volumes: `wireguard/ui/db` (UI DB, server keypair) and `wireguard/config/wg_confs` (`wg0.conf`)
+into `wireguard`; `seafile/data` (`/shared`) into `wireguard`; `seafile/db` into `seafile-db`;
+`letsencrypt/acme.json` into `traefik`.
+
 ## Run
 
 ```
