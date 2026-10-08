@@ -56,6 +56,10 @@ flowchart LR
     ui -. "wgctrl, wg-quick, wg0.conf" .-> wg0
 ```
 
+Without the Traefik overlay, the container's nginx is published on `$HTTP_BIND:$HTTP_PORT`
+(default `127.0.0.1:8080`); point your own TLS-terminating proxy at it and set
+`SEAFILE_FORCE_HTTPS=true` before the first start.
+
 Volumes: `wireguard/ui/db` (UI DB, server keypair) and `wireguard/config/wg_confs` (`wg0.conf`)
 into `wireguard`; `seafile/data` (`/shared`) into `wireguard`; `seafile/db` into `seafile-db`;
 `letsencrypt/acme.json` into `traefik`.
@@ -73,7 +77,9 @@ If the GHCR package is private, `docker login ghcr.io` with a token that has `re
 first.
 
 Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env`, or run
-`docker compose -f docker-compose.yaml up -d`.
+`docker compose -f docker-compose.yaml up -d`. Then proxy `https://$WG_HOST` to
+`http://127.0.0.1:$HTTP_PORT` (nginx: Seafile at `/`, UI at `/wg`), forwarding `Host` and
+`X-Forwarded-Proto`, and set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
 
 - Seafile: `https://$WG_HOST/` (with traefik) or `http://<wg address>/` over the tunnel.
   First start takes a couple of minutes (DB setup); watch `docker compose logs -f wireguard`.

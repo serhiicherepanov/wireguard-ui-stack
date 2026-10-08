@@ -116,9 +116,12 @@ Services:
 - **Traefik labels are on `wireguard`** in the overlay file. Keep the base file free of
   `traefik.*` labels. The overlay also sets `WGUI_WEBAUTHN_RP_ID/ORIGINS` to `WG_HOST` because
   passkeys need a fixed RP ID behind a proxy.
-- **The UI port is published in the base file**, bound to `127.0.0.1` by default so the stack is
-  usable without Traefik. Do not set `WGUI_BIND=0.0.0.0` on a public host when the traefik
-  overlay is active.
+- **Two HTTP ports are published in the base file**, both bound to `127.0.0.1` by default so
+  the stack is usable without Traefik behind any other proxy: `$HTTP_PORT` (8080) → nginx
+  (Seafile at `/`, UI at `/wg`; this is what an external proxy should target) and
+  `$WGUI_PORT` (5000) → the UI directly (kept for compatibility, same `BASE_PATH`). Do not bind
+  them to `0.0.0.0` on a public host. Without the overlay, `SEAFILE_FORCE_HTTPS=true` in `.env`
+  is what makes Seafile write https URLs on first run (the overlay forces it).
 - **Traefik uses `network_mode: host`.** That is why there is no `ports:` section on it. Do not
   add `ports:`.
 - **Volume paths are inherited from the old two-container layout** (`wireguard/config/wg_confs`
@@ -139,6 +142,8 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
   VPN subnet, not `0.0.0.0/0`.
 - `WGUI_FORK_REF` — commit sha/tag of the fork to build.
 - `WGUI_BASE_PATH` — URL prefix of the UI on every entry point (default `/wg`). Non-empty.
+- `HTTP_BIND`, `HTTP_PORT` — where the container's nginx (:80) is published without Traefik.
+- `SEAFILE_FORCE_HTTPS` — `true` when an external proxy terminates TLS (first-run default).
 - `ACME_EMAIL` — Let's Encrypt account email. HTTP-01: port 80 must be publicly reachable and
   `WG_HOST` must resolve here. No wildcards.
 - `TRAEFIK_DASHBOARD_USERS` — htpasswd line. If using bcrypt/md5, escape `$` as `$$`.

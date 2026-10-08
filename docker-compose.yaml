@@ -2,9 +2,9 @@
 # wireguard-ui and Seafile, plus Seafile's MariaDB and memcached. No reverse proxy.
 #
 # HTTP layout of the wireguard container: Seafile's nginx on :80 serves Seafile at / and
-# proxies $WGUI_BASE_PATH (default /wg) to the UI on :5000. Port 80 is not published here;
-# the traefik overlay sends the whole domain to it. Without the overlay, both are reachable
-# over the tunnel at http://<wg address>/ and /wg.
+# proxies $WGUI_BASE_PATH (default /wg) to the UI on :5000. That port is published on
+# $HTTP_BIND:$HTTP_PORT (default 127.0.0.1:8080) for your own reverse proxy; the traefik
+# overlay reaches it over the bridge instead. Over the tunnel: http://<wg address>/ and /wg.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #
@@ -80,8 +80,12 @@ services:
       - TIME_ZONE=${TZ:-Asia/Tbilisi}
       - DB_HOST=seafile-db
       - DB_ROOT_PASSWD=${SEAFILE_DB_ROOT_PASSWORD:?set SEAFILE_DB_ROOT_PASSWORD in .env}
-      # Certificates are Traefik's job (overlay); the container itself speaks plain HTTP.
+      # Certificates are the reverse proxy's job; the container itself speaks plain HTTP.
       - SEAFILE_SERVER_LETSENCRYPT=false
+      # Set SEAFILE_FORCE_HTTPS=true when your own proxy terminates TLS (first-run only:
+      # SERVICE_URL / FILE_SERVER_ROOT / CSRF_TRUSTED_ORIGINS get https://). The traefik
+      # overlay forces it to true.
+      - FORCE_HTTPS_IN_CONF=${SEAFILE_FORCE_HTTPS:-false}
       # First-run defaults only (SERVICE_URL / FILE_SERVER_ROOT, CSRF_TRUSTED_ORIGINS, nginx
       # server_name, admin account). See .env.example for changing them on an existing install.
       # Same domain as the UI unless SEAFILE_HOST is set. The traefik overlay adds
@@ -106,8 +110,10 @@ services:
       - seafile-memcached
     ports:
       - "${WG_PORT:-51821}:${WG_PORT:-51821}/udp"
-      # UI. Bound to localhost by default; with the traefik overlay the proxy
-      # handles public access.
+      # nginx: Seafile at /, UI at $WGUI_BASE_PATH. Point your own reverse proxy here
+      # (pass Host and X-Forwarded-Proto). Localhost only by default.
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:80"
+      # UI directly, bypassing nginx (same BASE_PATH). Kept for compatibility.
       - "${WGUI_BIND:-127.0.0.1}:${WGUI_PORT:-5000}:5000"
     logging:
       driver: "json-file"
