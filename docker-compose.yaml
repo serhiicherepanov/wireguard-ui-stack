@@ -3,8 +3,8 @@
 #
 # HTTP layout of the wireguard container: Seafile's nginx on :80 serves Seafile at / and
 # proxies $WGUI_BASE_PATH (default /wg) to the UI on :5000. Port 80 is not published here;
-# the traefik overlay routes https://$WG_HOST/ -> Seafile and https://$WG_HOST/wg -> UI.
-# Without the overlay, Seafile is reachable over the tunnel at http://<wg address>/.
+# the traefik overlay sends the whole domain to it. Without the overlay, both are reachable
+# over the tunnel at http://<wg address>/ and /wg.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #

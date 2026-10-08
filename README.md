@@ -17,8 +17,8 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
   `seafile-db` (MariaDB) and `seafile-memcached` on an internal network. UI is bound to
   `$WGUI_BIND:$WGUI_PORT` (default `127.0.0.1:5000`), WireGuard on `$WG_PORT/udp`.
 - `docker-compose.traefik.yaml` — optional overlay: Traefik on host network, :80/:443,
-  Let's Encrypt via HTTP-01 challenge, routes `https://$WG_HOST/` to Seafile and
-  `https://$WG_HOST/wg` to the UI.
+  Let's Encrypt via HTTP-01 challenge, sends `https://$WG_HOST` to the container's nginx
+  (Seafile at `/`, UI at `/wg`).
 
 ## Run
 
@@ -48,11 +48,11 @@ Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env
   same image (`seafileltd/seafile-mc:11.0-latest`), same MariaDB/memcached companions, same
   environment variables. The difference is that the Seafile image is the base of the
   `wireguard` image (see `Dockerfile`) instead of a separate container.
-- One domain for both: Traefik sends `/wg` to the UI and everything else to Seafile's nginx.
-  Seafile itself cannot live under a sub-path, which is why the UI is the one that moves.
-  The same split exists inside the container (nginx proxies `/wg` to the UI), so it also works
-  over the tunnel without Traefik. Passkeys need HTTPS and therefore only work via the
-  Traefik URL; password login works everywhere.
+- One domain for both: Traefik hands the whole domain to the nginx inside the container,
+  which serves Seafile at `/` and proxies `/wg` to the UI. Seafile itself cannot live under a
+  sub-path, which is why the UI is the one that moves. The same nginx split works over the
+  tunnel without Traefik. Passkeys need HTTPS and therefore only work via the Traefik URL;
+  password login works everywhere.
 - TLS is terminated by Traefik. The overlay sets `FORCE_HTTPS_IN_CONF=true`, and the image
   patches Seafile's first-run bootstrap so that `seahub_settings.py` gets an https
   `SERVICE_URL` (the stock image writes http there despite the flag) and

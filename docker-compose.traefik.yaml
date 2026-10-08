@@ -1,7 +1,8 @@
-# Optional overlay: Traefik reverse proxy + TLS (Let's Encrypt, HTTP-01) for Seafile and
-# the UI, both on the wireguard container:
-#   https://$SEAFILE_HOST/            -> Seafile (nginx :80)        [SEAFILE_HOST defaults to WG_HOST]
-#   https://$WG_HOST$WGUI_BASE_PATH   -> wireguard-ui (:5000)       [BASE_PATH is process-wide]
+# Optional overlay: Traefik reverse proxy + TLS (Let's Encrypt, HTTP-01) in front of the
+# wireguard container. One router, one target: everything on the domain goes to the
+# container's nginx (:80), which serves Seafile at / and proxies $WGUI_BASE_PATH to the UI.
+#   https://$WG_HOST/      -> Seafile
+#   https://$WG_HOST/wg    -> wireguard-ui
 # Usage: docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 
 services:
@@ -71,19 +72,9 @@ services:
       - FORCE_HTTPS_IN_CONF=true
     labels:
       - "traefik.enable=true"
-      # UI under BASE_PATH. Explicit priority: it must win over the Seafile catch-all below
-      # when both hosts are the same.
-      - "traefik.http.routers.wg-ui.entrypoints=default"
-      - "traefik.http.routers.wg-ui.rule=Host(`${WG_HOST}`) && PathPrefix(`${WGUI_BASE_PATH:-/wg}`)"
-      - "traefik.http.routers.wg-ui.priority=100"
-      - "traefik.http.routers.wg-ui.tls.certresolver=default"
-      - "traefik.http.routers.wg-ui.service=wg-ui"
-      - "traefik.http.services.wg-ui.loadbalancer.server.port=5000"
-
-      # Seafile: everything else on its host (nginx inside the container, :80).
-      - "traefik.http.routers.seafile.entrypoints=default"
-      - "traefik.http.routers.seafile.rule=Host(`${SEAFILE_HOST:-${WG_HOST}}`)"
-      - "traefik.http.routers.seafile.priority=10"
-      - "traefik.http.routers.seafile.tls.certresolver=default"
-      - "traefik.http.routers.seafile.service=seafile"
-      - "traefik.http.services.seafile.loadbalancer.server.port=80"
+      # Whole domain -> nginx inside the container; the / vs /wg split happens there
+      # (see nginx-ui-locations.sh). A second Host() only matters if SEAFILE_HOST differs.
+      - "traefik.http.routers.wireguard.entrypoints=default"
+      - "traefik.http.routers.wireguard.rule=Host(`${WG_HOST}`) || Host(`${SEAFILE_HOST:-${WG_HOST}}`)"
+      - "traefik.http.routers.wireguard.tls.certresolver=default"
+      - "traefik.http.services.wireguard.loadbalancer.server.port=80"

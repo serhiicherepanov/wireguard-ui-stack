@@ -38,7 +38,7 @@ Services:
 | `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | UI on port 5000 (under `$WGUI_BASE_PATH`), the WireGuard tunnel (`wg-quick up` on start) **and** Seafile (nginx :80 → `/` seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). Port 80 is not published; Traefik reaches it over the bridge. |
 | `seafile-db`   | `mariadb:10.11`              | base    | Seafile database, `internal` network only. |
 | `seafile-memcached` | `memcached:1.6`         | base    | Seafile cache, `internal` network only, alias `memcached`. |
-| `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. Routers: `Host($WG_HOST) && PathPrefix($WGUI_BASE_PATH)` → UI :5000 (priority 100), `Host($SEAFILE_HOST or $WG_HOST)` → Seafile :80 (priority 10). |
+| `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. One router: `Host($WG_HOST)` (and `$SEAFILE_HOST` if set) → container nginx :80. |
 
 ## Non-obvious design decisions — do not "fix" these
 
@@ -69,11 +69,13 @@ Services:
 - **One domain, Seafile at `/`, UI under `WGUI_BASE_PATH` (default `/wg`).** Seafile does not
   support a sub-path (nginx template, `FILE_SERVER_ROOT`, seafdav and the clients assume `/`),
   the fork does (`BASE_PATH`). `BASE_PATH` is process-wide, hence the UI is at `/wg` on every
-  entry (Traefik, Seafile nginx, `:5000`). Traefik does the split publicly (two routers on
-  the same container, explicit priorities). Inside the container the Dockerfile adds
+  entry (Traefik, Seafile nginx, `:5000`). The split lives in one place, the container's
+  nginx: Traefik has a single router that sends the whole domain to `:80`. The Dockerfile adds
   `include /etc/nginx/wireguard-ui.locations;` to the image's `seafile.nginx.conf.template`
   and `nginx-ui-locations.sh` (my_init.d, before runit starts nginx) renders that file from
-  `BASE_PATH` on every start, so `http://<wg address>/wg` works over the tunnel too. Seafile
+  `BASE_PATH` on every start, so the same split works over the tunnel and without Traefik.
+  The location forwards Traefik's `X-Forwarded-Proto` to the UI instead of nginx's own
+  `$scheme` (http), because passkeys compare origins. Seafile
   persists the rendered server block in `seafile/data/nginx/conf/seafile.nginx.conf`; an
   install rendered before this change needs that file deleted once. Keep `WGUI_BASE_PATH`
   non-empty: Seafile owns `/` (the nginx side just skips the location on an empty value).
@@ -187,7 +189,8 @@ docker compose logs -f wireguard                      # Seafile + UI + wg-quick,
 - Never commit `.env`, `wireguard/`, `letsencrypt/` or `seafile/` contents. Never print secret
   values from `.env`, `wireguard/ui/db/server/keypair.json` or `seafile/data/seafile/conf/`
   into chat, logs, or commit messages.
-- Do not publish Seafile's port 80 in the base file; Traefik reaches it over the bridge.
+- Do not publish port 80 in the base file; Traefik reaches it over the bridge. Do not add a
+  second Traefik router pointing at `:5000`; the UI is reached through nginx on purpose.
 - After bumping `SEAFILE_IMAGE`, check that the `sed` in the Dockerfile still hits the nginx
   template (the build greps for the include and fails otherwise).
 - Do not replace the image's `CMD` (`my_init` + Seafile) with `entrypoint.sh`; the UI runs as
