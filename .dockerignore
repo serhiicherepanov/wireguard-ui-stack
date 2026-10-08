@@ -3,4 +3,5 @@
 *
 !Dockerfile
 !entrypoint.sh
+!nginx-ui-locations.sh
 !assets/wireguard.svg

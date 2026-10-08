@@ -1,5 +1,11 @@
-# Base stack: a single container running both WireGuard (wg-quick) and the
-# Skyline-core fork of wireguard-ui. No reverse proxy.
+# Base stack: a single container running WireGuard (wg-quick), the Skyline-core fork of
+# wireguard-ui and Seafile, plus Seafile's MariaDB and memcached. No reverse proxy.
+#
+# Seafile is reachable ONLY through the tunnel: its nginx listens on :80 inside the wireguard
+# container and entrypoint.sh drops :80 on every interface except wg0. Nothing publishes it
+# and the traefik overlay does not route it. VPN clients open http://$SEAFILE_HOST/, which
+# must resolve to the server's WireGuard address (e.g. 10.13.13.1). The same nginx also
+# serves the UI under $WGUI_BASE_PATH (default /wg), so one wg-only domain carries both.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #
@@ -16,9 +22,13 @@ services:
         WGUI_FORK_REF: "${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
         GIT_COMMIT: "${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
         APP_VERSION: "skyline-${WGUI_FORK_REF:-fceb94000d415e1365885fc05c586486ac23a10b}"
+        SEAFILE_IMAGE: "${SEAFILE_IMAGE:-seafileltd/seafile-mc:11.0-latest}"
     image: wireguard-ui-skyline:local
     container_name: wireguard
     restart: always
+    # my_init stops Seafile (seaf-server, seahub), nginx and the tunnel in order; the compose
+    # default of 10s is too short and ends in SIGKILL.
+    stop_grace_period: 60s
     # NET_ADMIN: wg-quick / wg syncconf / ip route inside the container and
     # wgctrl (netlink) for the peer status pages.
     cap_add:
@@ -29,6 +39,8 @@ services:
     environment:
       - TZ=${TZ:-Asia/Tbilisi}
       - BIND_ADDRESS=0.0.0.0:5000
+      # UI lives under this prefix everywhere (Seafile nginx, Traefik, 127.0.0.1:5000).
+      - BASE_PATH=${WGUI_BASE_PATH:-/wg}
       - SESSION_SECRET=${WGUI_SESSION_SECRET:-}
       - WGUI_LOG_LEVEL=${WGUI_LOG_LEVEL:-INFO}
 
@@ -63,11 +75,33 @@ services:
       # --- Telegram bot ---
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_ALLOW_CONF_REQUEST=${TELEGRAM_ALLOW_CONF_REQUEST:-true}
+
+      # --- Seafile (same container; variables of the official seafile-mc image) ---
+      - TIME_ZONE=${TZ:-Asia/Tbilisi}
+      - DB_HOST=seafile-db
+      - DB_ROOT_PASSWD=${SEAFILE_DB_ROOT_PASSWORD:?set SEAFILE_DB_ROOT_PASSWORD in .env}
+      # Plain HTTP on purpose: the tunnel encrypts, and HTTP-01 cannot reach a wg-only host.
+      - SEAFILE_SERVER_LETSENCRYPT=false
+      # First-run defaults only (SERVICE_URL / FILE_SERVER_ROOT, nginx server_name, admin
+      # account). See .env.example for how to change them on an existing install.
+      - SEAFILE_SERVER_HOSTNAME=${SEAFILE_HOST:?set SEAFILE_HOST in .env}
+      - SEAFILE_ADMIN_EMAIL=${SEAFILE_ADMIN_EMAIL:-admin@example.com}
+      - SEAFILE_ADMIN_PASSWORD=${SEAFILE_ADMIN_PASSWORD:?set SEAFILE_ADMIN_PASSWORD in .env}
     volumes:
       # UI state: users, clients, server keypair, settings. Source of truth.
       - ./wireguard/ui/db:/app/db
       # wg0.conf rendered by the UI; wg-quick reads it from here.
       - ./wireguard/config/wg_confs:/etc/wireguard
+      # Seafile: conf, seafile-data (libraries), seahub-data, logs, generated nginx conf.
+      - ./seafile/data:/shared
+    networks:
+      # `default` keeps internet access, the published ports and the Traefik route;
+      # `seafile` is the internal backend network (MariaDB, memcached).
+      - default
+      - seafile
+    depends_on:
+      - seafile-db
+      - seafile-memcached
     ports:
       - "${WG_PORT:-51821}:${WG_PORT:-51821}/udp"
       # UI. Bound to localhost by default; with the traefik overlay the proxy
@@ -78,9 +112,56 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    # Deliberately checks the UI and the tunnel only: Traefik stops routing to an unhealthy
+    # container, and a Seafile hiccup must not take the VPN admin UI offline with it.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/login >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000${WGUI_BASE_PATH:-/wg}/login >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # --- Seafile backend (from the official docker-compose.yml, Seafile CE 11.0) ---
+  seafile-db:
+    image: mariadb:10.11
+    container_name: seafile-db
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SEAFILE_DB_ROOT_PASSWORD:?set SEAFILE_DB_ROOT_PASSWORD in .env}
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - ./seafile/db:/var/lib/mysql
+    networks:
+      - seafile
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  seafile-memcached:
+    image: memcached:1.6
+    container_name: seafile-memcached
+    restart: always
+    entrypoint: memcached -m 256
+    networks:
+      seafile:
+        # Seafile's bootstrap hardcodes CACHES LOCATION = memcached:11211 in seahub_settings.py.
+        aliases:
+          - memcached
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  seafile:
+    # No gateway: the DB and memcached have no route out and nothing outside reaches them.
+    internal: true

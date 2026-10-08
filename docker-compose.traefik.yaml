@@ -1,5 +1,9 @@
 # Optional overlay: Traefik reverse proxy + TLS (Let's Encrypt, HTTP-01) for the UI.
 # Usage: docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
+#
+# Seafile is intentionally NOT routed here: it is reachable only through the tunnel
+# (see docker-compose.yaml). Do not add a Host(`$SEAFILE_HOST`) router. The UI is served
+# at https://$WG_HOST$WGUI_BASE_PATH (BASE_PATH is process-wide); / redirects there.
 
 services:
   traefik:
@@ -70,3 +74,13 @@ services:
       - "traefik.http.routers.wg-ui.rule=Host(`${WG_HOST}`)"
       - "traefik.http.routers.wg-ui.tls.certresolver=default"
       - "traefik.http.services.wg-ui.loadbalancer.server.port=5000"
+
+      # https://$WG_HOST/ -> https://$WG_HOST$WGUI_BASE_PATH (the UI answers only under BASE_PATH).
+      - "traefik.http.routers.wg-ui-root.entrypoints=default"
+      - "traefik.http.routers.wg-ui-root.rule=Host(`${WG_HOST}`) && Path(`/`)"
+      - "traefik.http.routers.wg-ui-root.priority=600"
+      - "traefik.http.routers.wg-ui-root.tls.certresolver=default"
+      - "traefik.http.routers.wg-ui-root.service=wg-ui"
+      - "traefik.http.routers.wg-ui-root.middlewares=wg-ui-root-redirect"
+      - "traefik.http.middlewares.wg-ui-root-redirect.redirectregex.regex=^https://[^/]+/$$"
+      - "traefik.http.middlewares.wg-ui-root-redirect.redirectregex.replacement=https://${WG_HOST}${WGUI_BASE_PATH:-/wg}"

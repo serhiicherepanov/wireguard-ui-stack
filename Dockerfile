@@ -1,14 +1,22 @@
-# Builds the Skyline-core fork of wireguard-ui from its git repo at a pinned ref.
+# Builds one image that runs WireGuard, the Skyline-core fork of wireguard-ui AND Seafile.
 #
-# Why not the fork's own Dockerfile: it still uses golang:1.21 while go.mod requires
-# go >= 1.25, so `docker build <git-url>` fails. This file mirrors the fork's Dockerfile
-# (same asset layout, same init.sh entrypoint) with the toolchain bumped.
+# Stage 1 (builder): the fork from its git repo at a pinned ref.
+#   Why not the fork's own Dockerfile: it still uses golang:1.21 while go.mod requires
+#   go >= 1.25, so `docker build <git-url>` fails. This stage mirrors the fork's Dockerfile
+#   (same asset layout, same init.sh entrypoint) with the toolchain bumped. Sources are
+#   fetched with git, which works with both BuildKit and the legacy builder (ADD <git-url>
+#   does not).
 #
-# Build context is this directory (see .dockerignore); the sources are fetched with git,
-# which works with both BuildKit and the legacy builder (ADD <git-url> does not).
+# Stage 2 (runtime): the official Seafile CE image (Ubuntu 22.04, phusion my_init + runit)
+#   plus wireguard-tools and the fork binary. Seafile lives in the same container so that its
+#   nginx (:80) sits in the network namespace that owns wg0 and can be firewalled to the
+#   tunnel only (see entrypoint.sh). my_init stays PID 1: it runs Seafile's own startup and
+#   supervises nginx, cron and our `wireguard-ui` runit service.
+#
+# Build context is this directory (see .dockerignore).
 
 ARG GO_IMAGE=golang:1.25-alpine
-ARG RUNTIME_IMAGE=alpine:3.22
+ARG SEAFILE_IMAGE=seafileltd/seafile-mc:11.0-latest
 
 FROM ${GO_IMAGE} AS builder
 
@@ -53,19 +61,42 @@ RUN CGO_ENABLED=0 go build \
       -ldflags="-X 'main.appVersion=${APP_VERSION}' -X 'main.buildTime=${BUILD_TIME}' -X 'main.gitCommit=${GIT_COMMIT}'" \
       -a -o wg-ui .
 
-FROM ${RUNTIME_IMAGE}
+FROM ${SEAFILE_IMAGE}
 
-# wireguard-tools pulls in bash, iproute2 and openresolv (needed by wg-quick).
-# jq: init.sh reads config_file_path from the UI DB. iptables: PostUp/PostDown rules.
-RUN apk --no-cache add ca-certificates wireguard-tools jq iptables
+# wireguard-tools + iproute2 + openresolv: wg-quick. iptables: PostUp/PostDown rules and the
+# "Seafile only via wg0" firewall in entrypoint.sh. jq: init.sh reads config_file_path from
+# the UI DB. Everything else (nginx, python, cron, curl, wget) ships with the Seafile image.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        wireguard-tools iproute2 openresolv iptables jq && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-RUN mkdir -p db
+# One wg-only domain for both: Seafile's nginx also proxies BASE_PATH (default /wg) to the UI.
+# The server block gets an `include` of a file that nginx-ui-locations.sh generates from
+# BASE_PATH at every start (my_init.d runs before runit starts nginx). The grep fails the
+# build if a new Seafile image changes the template and the include did not land.
+COPY nginx-ui-locations.sh /etc/my_init.d/02_nginx_ui_locations.sh
+RUN chmod +x /etc/my_init.d/02_nginx_ui_locations.sh && \
+    sed -i '/^    location \/media {/i\    # wireguard-ui under BASE_PATH, see /etc/my_init.d/02_nginx_ui_locations.sh\n    include /etc/nginx/wireguard-ui.locations;\n' \
+        /templates/seafile.nginx.conf.template && \
+    grep -q 'include /etc/nginx/wireguard-ui.locations;' /templates/seafile.nginx.conf.template
 
-COPY --from=builder /build/wg-ui /build/init.sh ./
-# First-run fix: render wg0.conf before init.sh tries `wg-quick up` (see entrypoint.sh).
-COPY entrypoint.sh ./
-RUN chmod +x wg-ui init.sh entrypoint.sh
+# The UI keeps the fork's layout under /app (init.sh uses relative paths: db/, ./wg-ui).
+RUN mkdir -p /app/db
+COPY --from=builder /build/wg-ui /build/init.sh /app/
+# First-run fix (render wg0.conf before `wg-quick up`) + the wg0-only firewall for Seafile.
+COPY entrypoint.sh /app/
+RUN chmod +x /app/wg-ui /app/init.sh /app/entrypoint.sh
 
-EXPOSE 5000/tcp
-ENTRYPOINT ["./entrypoint.sh"]
+# Run tunnel + UI as a runit service next to Seafile's nginx and cron. runsv restarts it if
+# the UI dies; `sv force-stop` on container stop sends SIGTERM, which init.sh turns into
+# `wg-quick down`.
+RUN mkdir -p /etc/service/wireguard-ui && \
+    printf '#!/bin/sh\nexec 2>&1\ncd /app && exec ./entrypoint.sh\n' > /etc/service/wireguard-ui/run && \
+    chmod +x /etc/service/wireguard-ui/run
+
+EXPOSE 5000/tcp 80/tcp
+
+# Inherited from the Seafile image, restated on purpose: my_init must stay PID 1 (it runs
+# /etc/my_init.d, boots runit, then Seafile). Do not replace it with entrypoint.sh.
+CMD ["/sbin/my_init", "--", "/scripts/enterpoint.sh"]
