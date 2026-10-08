@@ -2,9 +2,12 @@
 # wireguard-ui and Seafile, plus Seafile's MariaDB and memcached. No reverse proxy.
 #
 # HTTP layout of the wireguard container: Seafile's nginx on :80 serves Seafile at / and
-# proxies $WGUI_BASE_PATH (default /wg) to the UI on :5000. That port is published on
-# $HTTP_BIND:$HTTP_PORT (default 127.0.0.1:8080) for your own reverse proxy; the traefik
-# overlay reaches it over the bridge instead. Over the tunnel: http://<wg address>/ and /wg.
+# proxies $WGUI_BASE_PATH (default /wg) to the UI (:5000, container-internal only). nginx is
+# the ONLY web port this container publishes: $HTTP_BIND:$HTTP_PORT (default 127.0.0.1:5000).
+#   HTTP_BIND=127.0.0.1  -> only a web server on this host can reach it (TLS ends there)
+#   HTTP_BIND=0.0.0.0    -> plain HTTP straight to the world
+#   traefik overlay      -> reaches :80 over the bridge, bind address irrelevant
+# Over the tunnel: http://<wg address>/ and /wg.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #
@@ -110,11 +113,9 @@ services:
       - seafile-memcached
     ports:
       - "${WG_PORT:-51821}:${WG_PORT:-51821}/udp"
-      # nginx: Seafile at /, UI at $WGUI_BASE_PATH. Point your own reverse proxy here
-      # (pass Host and X-Forwarded-Proto). Localhost only by default.
-      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:80"
-      # UI directly, bypassing nginx (same BASE_PATH). Kept for compatibility.
-      - "${WGUI_BIND:-127.0.0.1}:${WGUI_PORT:-5000}:5000"
+      # The one web port: nginx with Seafile at / and the UI at $WGUI_BASE_PATH. Point your
+      # reverse proxy here (pass Host and X-Forwarded-Proto). Do not publish anything else.
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-5000}:80"
     logging:
       driver: "json-file"
       options:

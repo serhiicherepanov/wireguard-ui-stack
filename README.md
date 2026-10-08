@@ -14,8 +14,9 @@ for a local build.
 Two compose files (one service `wireguard` = tunnel + UI + Seafile, container name `wireguard`):
 
 - `docker-compose.yaml` — base: `wireguard` (UI fork + wg-quick + Seafile, `NET_ADMIN`), plus
-  `seafile-db` (MariaDB) and `seafile-memcached` on an internal network. UI is bound to
-  `$WGUI_BIND:$WGUI_PORT` (default `127.0.0.1:5000`), WireGuard on `$WG_PORT/udp`.
+  `seafile-db` (MariaDB) and `seafile-memcached` on an internal network. Publishes exactly
+  two ports: nginx (Seafile at `/`, UI at `/wg`) on `$HTTP_BIND:$HTTP_PORT` (default
+  `127.0.0.1:5000`) and WireGuard on `$WG_PORT/udp`.
 - `docker-compose.traefik.yaml` — optional overlay: Traefik on host network, :80/:443,
   Let's Encrypt via HTTP-01 challenge, sends `https://$WG_HOST` to the container's nginx
   (Seafile at `/`, UI at `/wg`).
@@ -35,7 +36,7 @@ flowchart LR
         subgraph wgc["wireguard container · ghcr.io/serhiicherepanov/wireguard-ui-stack"]
             nginx["nginx :80<br/>/ → Seafile · /wg → UI"]
             seafile["Seafile 11<br/>seahub :8000 · seaf-server :8082"]
-            ui["wireguard-ui :5000<br/>BASE_PATH=/wg"]
+            ui["wireguard-ui :5000 (internal)<br/>BASE_PATH=/wg"]
             wg0["wg0 (wg-quick)<br/>UDP $WG_PORT"]
         end
 
@@ -47,6 +48,7 @@ flowchart LR
 
     browser -- "https://$WG_HOST" --> traefik
     traefik -- "bridge network, plain http" --> nginx
+    browser -. "or your own proxy →<br/>$HTTP_BIND:$HTTP_PORT (default 127.0.0.1:5000)" .-> nginx
     nginx --> seafile
     nginx --> ui
     peer -- "UDP $WG_PORT" --> wg0
@@ -56,9 +58,10 @@ flowchart LR
     ui -. "wgctrl, wg-quick, wg0.conf" .-> wg0
 ```
 
-Without the Traefik overlay, the container's nginx is published on `$HTTP_BIND:$HTTP_PORT`
-(default `127.0.0.1:8080`); point your own TLS-terminating proxy at it and set
-`SEAFILE_FORCE_HTTPS=true` before the first start.
+The only published web port is the container's nginx on `$HTTP_BIND:$HTTP_PORT` (default
+`127.0.0.1:5000`). Without the Traefik overlay, point your own TLS-terminating proxy at it
+and set `SEAFILE_FORCE_HTTPS=true` before the first start; `HTTP_BIND=0.0.0.0` exposes it as
+plain HTTP instead.
 
 Volumes: `wireguard/ui/db` (UI DB, server keypair) and `wireguard/config/wg_confs` (`wg0.conf`)
 into `wireguard`; `seafile/data` (`/shared`) into `wireguard`; `seafile/db` into `seafile-db`;
@@ -79,12 +82,13 @@ first.
 Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env`, or run
 `docker compose -f docker-compose.yaml up -d`. Then proxy `https://$WG_HOST` to
 `http://127.0.0.1:$HTTP_PORT` (nginx: Seafile at `/`, UI at `/wg`), forwarding `Host` and
-`X-Forwarded-Proto`, and set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
+`X-Forwarded-Proto`, with no body-size limit and long read timeouts for `/seafhttp`, and
+set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
 
 - Seafile: `https://$WG_HOST/` (with traefik) or `http://<wg address>/` over the tunnel.
   First start takes a couple of minutes (DB setup); watch `docker compose logs -f wireguard`.
-- UI: `https://$WG_HOST/wg` (with traefik), `http://<wg address>/wg` (through the tunnel) or
-  `http://127.0.0.1:5000/wg` (on the host). The prefix is `WGUI_BASE_PATH`.
+- UI: `https://$WG_HOST/wg` (behind a proxy), `http://<wg address>/wg` (through the tunnel) or
+  `http://127.0.0.1:$HTTP_PORT/wg` (on the host). The prefix is `WGUI_BASE_PATH`.
 - Traefik dashboard: `https://$WG_HOST/traefik/dashboard/` (basic auth from `TRAEFIK_DASHBOARD_USERS`)
 - WireGuard: `$WG_HOST:$WG_PORT/udp`
 
