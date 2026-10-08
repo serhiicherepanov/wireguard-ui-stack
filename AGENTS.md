@@ -4,8 +4,8 @@ Guidance for AI agents and humans working in this repo.
 
 ## What this is
 
-A standalone Docker Compose stack: WireGuard VPN with a web UI, fronted by Traefik, plus a
-Seafile CE server that is reachable only through the tunnel.
+A standalone Docker Compose stack: WireGuard VPN with a web UI plus a Seafile CE server,
+both fronted by Traefik on one domain (Seafile at `/`, the UI at `/wg`).
 It was split out of `../docker-compose-openvpn-admin` and is meant to run on its own host.
 
 The UI is the **Skyline-core fork of wireguard-ui** (v2 UI, Status/Dashboard/Traffic pages,
@@ -21,7 +21,9 @@ and so does **Seafile** (the official `seafileltd/seafile-mc` image is the runti
   and layers it onto the Seafile image (`SEAFILE_IMAGE`). `entrypoint.sh` is the `wireguard-ui`
   runit service inside that image.
 - `nginx-ui-locations.sh` — my_init.d step baked into the image; renders the nginx `location`
-  that puts the UI under `WGUI_BASE_PATH` on Seafile's nginx (one wg-only domain for both).
+  that puts the UI under `WGUI_BASE_PATH` on Seafile's nginx (`:80` serves both).
+- `patch-seafile-bootstrap.py` — build-time patch of the image's first-run bootstrap
+  (`SERVICE_URL` with https, `CSRF_TRUSTED_ORIGINS`), see design notes.
 - `assets/wireguard.svg` — logo the fork's templates reference but do not ship; baked into the
   image at build time (embedded `assets/` dir).
 - `.env` / `.env.example` — all configuration.
@@ -33,10 +35,10 @@ Services:
 
 | Service        | Image                        | File    | Role |
 |----------------|------------------------------|---------|------|
-| `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | UI on port 5000 (under `$WGUI_BASE_PATH`), the WireGuard tunnel (`wg-quick up` on start) **and** Seafile (nginx :80 → `/` seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). Port 80 is not published and is firewalled to `wg0`. |
+| `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | UI on port 5000 (under `$WGUI_BASE_PATH`), the WireGuard tunnel (`wg-quick up` on start) **and** Seafile (nginx :80 → `/` seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes `$WG_PORT/udp` and the UI on `$WGUI_BIND:$WGUI_PORT` (default localhost only). Port 80 is not published; Traefik reaches it over the bridge. |
 | `seafile-db`   | `mariadb:10.11`              | base    | Seafile database, `internal` network only. |
 | `seafile-memcached` | `memcached:1.6`         | base    | Seafile cache, `internal` network only, alias `memcached`. |
-| `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. Routes the UI only (`https://$WG_HOST$WGUI_BASE_PATH`, `/` redirects there), never Seafile. |
+| `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. Routers: `Host($WG_HOST) && PathPrefix($WGUI_BASE_PATH)` → UI :5000 (priority 100), `Host($SEAFILE_HOST or $WG_HOST)` → Seafile :80 (priority 10). |
 
 ## Non-obvious design decisions — do not "fix" these
 
@@ -55,54 +57,48 @@ Services:
   checks during interpolation. `docker compose build` still works locally and produces the
   same tag. Bump `WGUI_FORK_REF` in the compose default to upgrade; keep it a full sha or
   tag. `WG_IMAGE` in `.env` pins the server to a specific `:sha-…` tag if wanted.
-- **Seafile runs inside the `wireguard` container, on top of the official image.** The
-  requirement is "Seafile only via the VPN address". Its nginx must therefore listen in the
-  network namespace that owns `wg0`, and the runtime stage of our `Dockerfile` is
-  `FROM seafileltd/seafile-mc` (Ubuntu 22.04, phusion `my_init` + runit) with
+- **Seafile runs inside the `wireguard` container, on top of the official image.** One image
+  to build in CI, ship and run; its nginx serves Seafile and proxies the UI, so the container
+  has a single HTTP entry (:80) next to the UI's own :5000. The runtime stage of our
+  `Dockerfile` is `FROM seafileltd/seafile-mc` (Ubuntu 22.04, phusion `my_init` + runit) with
   `wireguard-tools`, `iptables`, `jq` and the fork binary added. `my_init` stays PID 1 and
   CMD is Seafile's own `/scripts/enterpoint.sh`; the tunnel + UI run as the runit service
   `/etc/service/wireguard-ui/run` → `/app/entrypoint.sh` → the fork's `init.sh`. runsv
   restarts the UI if it dies; on container stop `sv force-stop` sends SIGTERM and `init.sh`
-  runs `wg-quick down`. (The alternative, a separate Seafile container with
-  `network_mode: service:wireguard`, breaks on every restart of `wireguard` — the exact
-  dance the single-container design avoids.)
-- **Why Traefik does not route Seafile, even on its own domain.** Traefik is on the host
-  network and listens on the public interface; `wg0` lives inside the `wireguard` container.
-  A request to `SEAFILE_HOST` (resolving to the wg address) arrives inside the container and
-  never passes Traefik. A Traefik `Host()` router would require the name to resolve to the
-  public IP, i.e. make Seafile internet-reachable; an `ipAllowList` cannot save that because
-  peers' traffic to the public IP leaves the tunnel (AllowedIPs is the VPN subnet only). The
-  reverse proxy on the wg side is therefore Seafile's own nginx.
-- **One wg-only domain for both, UI under `WGUI_BASE_PATH` (default `/wg`).** Seafile does not
+  runs `wg-quick down`.
+- **One domain, Seafile at `/`, UI under `WGUI_BASE_PATH` (default `/wg`).** Seafile does not
   support a sub-path (nginx template, `FILE_SERVER_ROOT`, seafdav and the clients assume `/`),
-  the fork does (`BASE_PATH`). So Seafile keeps `/` and the UI moves to `/wg`: `BASE_PATH` is
-  process-wide, hence the UI is at `/wg` on every entry (Seafile nginx, Traefik, `:5000`).
-  Mechanics: the Dockerfile adds `include /etc/nginx/wireguard-ui.locations;` to the image's
-  `seafile.nginx.conf.template`; `nginx-ui-locations.sh` (my_init.d, before runit starts nginx)
-  renders that file from `BASE_PATH` on every start. Because Seafile persists the rendered
-  server block in `seafile/data/nginx/conf/seafile.nginx.conf`, an install rendered before this
-  change needs that file deleted once. Keep `WGUI_BASE_PATH` non-empty while the Traefik overlay
-  is active: its `/` → `/wg` redirect would loop on an empty value (the nginx side just skips
-  the location). Passkeys work only via the HTTPS Traefik URL (WebAuthn needs a secure
-  context; `http://$SEAFILE_HOST/wg` gets password login).
-- **"Seafile only via wg0" is enforced with iptables in `entrypoint.sh`**, not by nginx
-  binding: the server's wg address lives in the UI DB and may change. The rules are
-  `INPUT -p tcp --dport 80 -i lo ACCEPT` then `! -i <wg-if> DROP`, installed idempotently
-  before `wg-quick up` (the interface name is derived from `config_file_path`). Port 80 is
-  also not published and Traefik has no router for it. Only IPv4: the Seafile nginx listens on
-  IPv4 only and the compose networks have no IPv6.
-- **Seafile first-run defaults**: `SEAFILE_SERVER_HOSTNAME` (= `SEAFILE_HOST`), admin
-  email/password and `DB_ROOT_PASSWD` are consumed only when `seafile/data/seafile/` does not
-  exist yet. The hostname ends up in `seahub_settings.py` (`SERVICE_URL`, `FILE_SERVER_ROOT`)
-  and in the persisted `seafile/data/nginx/conf/seafile.nginx.conf` (`server_name`; it is
-  also nginx's default server, so the bare wg IP answers too, but generated links use the name).
-  `SEAFILE_SERVER_LETSENCRYPT` is hardcoded `false`: plain HTTP over the tunnel, HTTP-01
-  cannot reach a wg-only host anyway.
+  the fork does (`BASE_PATH`). `BASE_PATH` is process-wide, hence the UI is at `/wg` on every
+  entry (Traefik, Seafile nginx, `:5000`). Traefik does the split publicly (two routers on
+  the same container, explicit priorities). Inside the container the Dockerfile adds
+  `include /etc/nginx/wireguard-ui.locations;` to the image's `seafile.nginx.conf.template`
+  and `nginx-ui-locations.sh` (my_init.d, before runit starts nginx) renders that file from
+  `BASE_PATH` on every start, so `http://<wg address>/wg` works over the tunnel too. Seafile
+  persists the rendered server block in `seafile/data/nginx/conf/seafile.nginx.conf`; an
+  install rendered before this change needs that file deleted once. Keep `WGUI_BASE_PATH`
+  non-empty: Seafile owns `/` (the nginx side just skips the location on an empty value).
+- **TLS ends at Traefik; Seafile must still write https URLs and trust the https origin.**
+  The overlay sets `FORCE_HTTPS_IN_CONF=true` (the official knob). Two things the image gets
+  wrong on first run, fixed by `patch-seafile-bootstrap.py` (run at build time against
+  `/scripts/bootstrap.py`; the build fails if its anchor line is gone):
+  1. `bootstrap.py` runs `setup-seafile-mysql.py` with a hand-built `env=`, so
+     `FORCE_HTTPS_IN_CONF` never reaches it and `SERVICE_URL` comes out as `http://` while
+     `FILE_SERVER_ROOT` is `https://`. The patch re-states `SERVICE_URL` later in the file.
+  2. Seahub sees plain HTTP from its nginx, and Django 4 (Seafile 11) rejects every POST whose
+     `Origin` is `https://…` unless it is in `CSRF_TRUSTED_ORIGINS`, which the image never
+     writes. Without it the Seafile login returns 403. The patch appends it.
+- **Seafile first-run defaults**: `SEAFILE_SERVER_HOSTNAME` (= `SEAFILE_HOST`, default
+  `WG_HOST`), `FORCE_HTTPS_IN_CONF`, admin email/password and `DB_ROOT_PASSWD` are consumed
+  only when `seafile/data/seafile/` does not exist yet. The hostname ends up in
+  `seahub_settings.py` (`SERVICE_URL`, `FILE_SERVER_ROOT`, `CSRF_TRUSTED_ORIGINS`) and in the
+  persisted nginx server block (`server_name`; it is also nginx's default server).
+  `SEAFILE_SERVER_LETSENCRYPT` is hardcoded `false`: certificates are Traefik's job.
 - **`memcached` network alias is required**: Seafile's bootstrap hardcodes
   `memcached:11211` into `seahub_settings.py`. `DB_HOST=seafile-db` is configurable and is
   written into `seafile.conf` on first run.
 - **The `wireguard` healthcheck covers the UI and the tunnel only.** Traefik drops unhealthy
-  containers from routing, so a Seafile problem must not take the VPN admin UI offline.
+  containers from routing (both routers, since both point at this container), so the check
+  deliberately does not depend on Seafile's slower start.
 - **Stop timing**: `stop_grace_period: 60s` because `my_init` stops seaf-server/seahub,
   nginx, cron and then the tunnel; the compose default (10s) ends in SIGKILL.
 - **Lifecycle env combination** in the base file:
@@ -145,9 +141,8 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
   `WG_HOST` must resolve here. No wildcards.
 - `TRAEFIK_DASHBOARD_USERS` — htpasswd line. If using bcrypt/md5, escape `$` as `$$`.
 - `TELEGRAM_TOKEN` — for the UI's Telegram bot that hands out configs.
-- `SEAFILE_HOST` — Seafile domain (plain HTTP). For VPN clients it must resolve to the
-  server's wg address (`WG_SERVER_ADDRESS` without prefix, e.g. `10.13.13.1`); a public A
-  record pointing at that private IP is fine. First-run default (see above).
+- `SEAFILE_HOST` — Seafile domain, optional; defaults to `WG_HOST` (Seafile at `/`, UI at
+  `/wg`). A separate value must also resolve to this host. First-run default (see above).
 - `SEAFILE_DB_ROOT_PASSWORD`, `SEAFILE_ADMIN_EMAIL`, `SEAFILE_ADMIN_PASSWORD` — MariaDB root
   and the initial Seafile admin. First-run defaults.
 - `SEAFILE_IMAGE` — runtime base image (default `seafileltd/seafile-mc:11.0-latest`).
@@ -175,10 +170,10 @@ docker compose build                              # or build it locally (same ta
 docker compose up -d
 docker compose logs -f wireguard traefik
 docker compose exec wireguard wg show
-docker compose exec wireguard iptables -S INPUT       # expect the two tcp/80 rules first
 docker compose exec wireguard sv status /etc/service/*  # nginx, cron, wireguard-ui
-docker compose exec wireguard curl -sI -H "Host: $SEAFILE_HOST" http://127.0.0.1/   # Seafile up?
-docker compose exec wireguard curl -sI -H "Host: $SEAFILE_HOST" http://127.0.0.1/wg/login  # UI via nginx
+docker compose exec wireguard curl -sI http://127.0.0.1/            # Seafile up? (302 to login)
+docker compose exec wireguard curl -sI http://127.0.0.1/wg/login    # UI via nginx (200)
+docker compose exec wireguard grep -E '^(SERVICE_URL|FILE_SERVER_ROOT|CSRF_TRUSTED)' /shared/seafile/conf/seahub_settings.py
 docker compose logs -f wireguard                      # Seafile + UI + wg-quick, one stream
 ```
 
@@ -192,8 +187,7 @@ docker compose logs -f wireguard                      # Seafile + UI + wg-quick,
 - Never commit `.env`, `wireguard/`, `letsencrypt/` or `seafile/` contents. Never print secret
   values from `.env`, `wireguard/ui/db/server/keypair.json` or `seafile/data/seafile/conf/`
   into chat, logs, or commit messages.
-- Do not publish Seafile's port 80, add a Traefik router for it, bind it to `0.0.0.0` on the
-  host or remove the iptables rules in `entrypoint.sh`: wg-only access is the requirement.
+- Do not publish Seafile's port 80 in the base file; Traefik reaches it over the bridge.
 - After bumping `SEAFILE_IMAGE`, check that the `sed` in the Dockerfile still hits the nginx
   template (the build greps for the include and fails otherwise).
 - Do not replace the image's `CMD` (`my_init` + Seafile) with `entrypoint.sh`; the UI runs as

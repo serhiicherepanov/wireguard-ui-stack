@@ -2,8 +2,8 @@
 
 One container runs the WireGuard tunnel (`wg-quick`), the web UI and a Seafile CE server.
 The UI sees the live interface and shows peer status (handshakes, transfer, connected/offline)
-on its Status, Dashboard and Traffic pages. Seafile sits in the same network namespace so it
-can be served **only to VPN peers**: its port 80 is firewalled to `wg0` and never published.
+on its Status, Dashboard and Traffic pages. Traefik serves both on one domain: Seafile at
+`https://$WG_HOST/`, the UI at `https://$WG_HOST/wg`.
 
 The UI is the [Skyline-core fork of wireguard-ui](https://github.com/Skyline-core/wireguard-ui).
 It publishes no image, so this repo builds its own: GitHub Actions builds `Dockerfile` on
@@ -17,7 +17,8 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
   `seafile-db` (MariaDB) and `seafile-memcached` on an internal network. UI is bound to
   `$WGUI_BIND:$WGUI_PORT` (default `127.0.0.1:5000`), WireGuard on `$WG_PORT/udp`.
 - `docker-compose.traefik.yaml` — optional overlay: Traefik on host network, :80/:443,
-  Let's Encrypt via HTTP-01 challenge, routes `https://$WG_HOST/wg` to the UI.
+  Let's Encrypt via HTTP-01 challenge, routes `https://$WG_HOST/` to Seafile and
+  `https://$WG_HOST/wg` to the UI.
 
 ## Run
 
@@ -34,13 +35,12 @@ first.
 Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env`, or run
 `docker compose -f docker-compose.yaml up -d`.
 
-- UI: `https://$WG_HOST/wg` (with traefik; `/` redirects there), `http://$SEAFILE_HOST/wg`
-  (through the tunnel) or `http://127.0.0.1:5000/wg` (on the host). The prefix is
-  `WGUI_BASE_PATH`.
+- Seafile: `https://$WG_HOST/` (with traefik) or `http://<wg address>/` over the tunnel.
+  First start takes a couple of minutes (DB setup); watch `docker compose logs -f wireguard`.
+- UI: `https://$WG_HOST/wg` (with traefik), `http://<wg address>/wg` (through the tunnel) or
+  `http://127.0.0.1:5000/wg` (on the host). The prefix is `WGUI_BASE_PATH`.
 - Traefik dashboard: `https://$WG_HOST/traefik/dashboard/` (basic auth from `TRAEFIK_DASHBOARD_USERS`)
 - WireGuard: `$WG_HOST:$WG_PORT/udp`
-- Seafile: `http://$SEAFILE_HOST/` **from a connected VPN client only**. First start takes a
-  couple of minutes (DB setup); watch `docker compose logs -f wireguard`.
 
 ## Seafile
 
@@ -48,23 +48,22 @@ Without Traefik: drop `docker-compose.traefik.yaml` from `COMPOSE_FILE` in `.env
   same image (`seafileltd/seafile-mc:11.0-latest`), same MariaDB/memcached companions, same
   environment variables. The difference is that the Seafile image is the base of the
   `wireguard` image (see `Dockerfile`) instead of a separate container.
-- Access is wg-only: `entrypoint.sh` drops tcp/80 on every interface but `wg0` (and `lo`),
-  the port is not published, Traefik does not route it. Plain HTTP; the tunnel encrypts.
-  Traefik cannot route it even on a separate domain: it listens on the public interface,
-  while `wg0` lives inside the container, so a request to the wg address never reaches it.
-- One domain for both: Seafile's nginx serves `/` itself and proxies `$WGUI_BASE_PATH`
-  (default `/wg`) to the UI, so `http://$SEAFILE_HOST/wg` is the wg-only UI entry. Seafile
-  itself cannot live under a sub-path, which is why the UI is the one that moves. Passkeys
-  need HTTPS and therefore only work via the Traefik URL; password login works everywhere.
-- `SEAFILE_HOST` must resolve, on the clients, to the server's WireGuard address
-  (`WG_SERVER_ADDRESS` without the `/24`, e.g. `10.13.13.1`). A public DNS A record with that
-  private IP works; so does a hosts-file entry. `http://10.13.13.1/` answers as well, but
-  upload/download/share links are generated with `SEAFILE_HOST`, so the name must resolve.
-- `SEAFILE_HOST`, the admin account and `SEAFILE_DB_ROOT_PASSWORD` are read on the first start
-  only. To change the host later edit `SERVICE_URL`/`FILE_SERVER_ROOT` in
+- One domain for both: Traefik sends `/wg` to the UI and everything else to Seafile's nginx.
+  Seafile itself cannot live under a sub-path, which is why the UI is the one that moves.
+  The same split exists inside the container (nginx proxies `/wg` to the UI), so it also works
+  over the tunnel without Traefik. Passkeys need HTTPS and therefore only work via the
+  Traefik URL; password login works everywhere.
+- TLS is terminated by Traefik. The overlay sets `FORCE_HTTPS_IN_CONF=true`, and the image
+  patches Seafile's first-run bootstrap so that `seahub_settings.py` gets an https
+  `SERVICE_URL` (the stock image writes http there despite the flag) and
+  `CSRF_TRUSTED_ORIGINS` (Seafile 11 / Django 4 otherwise answers 403 to the login POST).
+- `SEAFILE_HOST` is optional and defaults to `WG_HOST`. It, the admin account and
+  `SEAFILE_DB_ROOT_PASSWORD` are read on the first start only. To change the host later edit
+  `SERVICE_URL`, `FILE_SERVER_ROOT` and `CSRF_TRUSTED_ORIGINS` in
   `seafile/data/seafile/conf/seahub_settings.py`, delete
-  `seafile/data/nginx/conf/seafile.nginx.conf` and restart.
-- Clients (desktop sync, mobile) use the same `http://$SEAFILE_HOST` and need the VPN up.
+  `seafile/data/nginx/conf/seafile.nginx.conf` and restart. On a fresh install it is simpler
+  to stop the stack, delete `seafile/data` and `seafile/db`, and start again.
+- Clients (desktop sync, mobile) use `https://$WG_HOST`.
 
 ## How changes are applied
 

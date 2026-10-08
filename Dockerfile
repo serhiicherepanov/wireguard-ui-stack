@@ -8,10 +8,10 @@
 #   does not).
 #
 # Stage 2 (runtime): the official Seafile CE image (Ubuntu 22.04, phusion my_init + runit)
-#   plus wireguard-tools and the fork binary. Seafile lives in the same container so that its
-#   nginx (:80) sits in the network namespace that owns wg0 and can be firewalled to the
-#   tunnel only (see entrypoint.sh). my_init stays PID 1: it runs Seafile's own startup and
-#   supervises nginx, cron and our `wireguard-ui` runit service.
+#   plus wireguard-tools and the fork binary. Seafile lives in the same container (one image
+#   to build, ship and run; its nginx also serves the UI under BASE_PATH). my_init stays
+#   PID 1: it runs Seafile's own startup and supervises nginx, cron and our `wireguard-ui`
+#   runit service.
 #
 # Build context is this directory (see .dockerignore).
 
@@ -63,15 +63,15 @@ RUN CGO_ENABLED=0 go build \
 
 FROM ${SEAFILE_IMAGE}
 
-# wireguard-tools + iproute2 + openresolv: wg-quick. iptables: PostUp/PostDown rules and the
-# "Seafile only via wg0" firewall in entrypoint.sh. jq: init.sh reads config_file_path from
-# the UI DB. Everything else (nginx, python, cron, curl, wget) ships with the Seafile image.
+# wireguard-tools + iproute2 + openresolv: wg-quick. iptables: PostUp/PostDown rules.
+# jq: init.sh reads config_file_path from the UI DB. Everything else (nginx, python, cron,
+# curl, wget) ships with the Seafile image.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         wireguard-tools iproute2 openresolv iptables jq && \
     rm -rf /var/lib/apt/lists/*
 
-# One wg-only domain for both: Seafile's nginx also proxies BASE_PATH (default /wg) to the UI.
+# Seafile's nginx also proxies BASE_PATH (default /wg) to the UI (direct / tunnel access).
 # The server block gets an `include` of a file that nginx-ui-locations.sh generates from
 # BASE_PATH at every start (my_init.d runs before runit starts nginx). The grep fails the
 # build if a new Seafile image changes the template and the include did not land.
@@ -81,10 +81,17 @@ RUN chmod +x /etc/my_init.d/02_nginx_ui_locations.sh && \
         /templates/seafile.nginx.conf.template && \
     grep -q 'include /etc/nginx/wireguard-ui.locations;' /templates/seafile.nginx.conf.template
 
+# TLS is terminated by Traefik: make Seafile's first-run bootstrap also write
+# CSRF_TRUSTED_ORIGINS into seahub_settings.py (see the script for why). Fails the build if
+# a new Seafile image moved the anchor line.
+COPY patch-seafile-bootstrap.py /scripts/
+RUN python3 /scripts/patch-seafile-bootstrap.py /scripts/bootstrap.py && \
+    python3 -m py_compile /scripts/bootstrap.py
+
 # The UI keeps the fork's layout under /app (init.sh uses relative paths: db/, ./wg-ui).
 RUN mkdir -p /app/db
 COPY --from=builder /build/wg-ui /build/init.sh /app/
-# First-run fix (render wg0.conf before `wg-quick up`) + the wg0-only firewall for Seafile.
+# First-run fix (render wg0.conf before `wg-quick up`).
 COPY entrypoint.sh /app/
 RUN chmod +x /app/wg-ui /app/init.sh /app/entrypoint.sh
 

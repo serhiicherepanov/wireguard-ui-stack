@@ -1,11 +1,10 @@
 # Base stack: a single container running WireGuard (wg-quick), the Skyline-core fork of
 # wireguard-ui and Seafile, plus Seafile's MariaDB and memcached. No reverse proxy.
 #
-# Seafile is reachable ONLY through the tunnel: its nginx listens on :80 inside the wireguard
-# container and entrypoint.sh drops :80 on every interface except wg0. Nothing publishes it
-# and the traefik overlay does not route it. VPN clients open http://$SEAFILE_HOST/, which
-# must resolve to the server's WireGuard address (e.g. 10.13.13.1). The same nginx also
-# serves the UI under $WGUI_BASE_PATH (default /wg), so one wg-only domain carries both.
+# HTTP layout of the wireguard container: Seafile's nginx on :80 serves Seafile at / and
+# proxies $WGUI_BASE_PATH (default /wg) to the UI on :5000. Port 80 is not published here;
+# the traefik overlay routes https://$WG_HOST/ -> Seafile and https://$WG_HOST/wg -> UI.
+# Without the overlay, Seafile is reachable over the tunnel at http://<wg address>/.
 # Add Traefik with:  docker compose -f docker-compose.yaml -f docker-compose.traefik.yaml up -d
 # or set COMPOSE_FILE in .env (see .env.example).
 #
@@ -81,11 +80,13 @@ services:
       - TIME_ZONE=${TZ:-Asia/Tbilisi}
       - DB_HOST=seafile-db
       - DB_ROOT_PASSWD=${SEAFILE_DB_ROOT_PASSWORD:?set SEAFILE_DB_ROOT_PASSWORD in .env}
-      # Plain HTTP on purpose: the tunnel encrypts, and HTTP-01 cannot reach a wg-only host.
+      # Certificates are Traefik's job (overlay); the container itself speaks plain HTTP.
       - SEAFILE_SERVER_LETSENCRYPT=false
-      # First-run defaults only (SERVICE_URL / FILE_SERVER_ROOT, nginx server_name, admin
-      # account). See .env.example for how to change them on an existing install.
-      - SEAFILE_SERVER_HOSTNAME=${SEAFILE_HOST:?set SEAFILE_HOST in .env}
+      # First-run defaults only (SERVICE_URL / FILE_SERVER_ROOT, CSRF_TRUSTED_ORIGINS, nginx
+      # server_name, admin account). See .env.example for changing them on an existing install.
+      # Same domain as the UI unless SEAFILE_HOST is set. The traefik overlay adds
+      # FORCE_HTTPS_IN_CONF=true so the URLs are written with https://.
+      - SEAFILE_SERVER_HOSTNAME=${SEAFILE_HOST:-${WG_HOST}}
       - SEAFILE_ADMIN_EMAIL=${SEAFILE_ADMIN_EMAIL:-admin@example.com}
       - SEAFILE_ADMIN_PASSWORD=${SEAFILE_ADMIN_PASSWORD:?set SEAFILE_ADMIN_PASSWORD in .env}
     volumes:
