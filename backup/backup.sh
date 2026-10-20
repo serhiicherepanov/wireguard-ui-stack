@@ -49,9 +49,21 @@ if ! ssh-keygen -F "$BACKUP_SSH_HOST" -f "$known_hosts" >/dev/null 2>&1 \
   ssh-keyscan -p "$port" -T 30 "$BACKUP_SSH_HOST" 2>/dev/null | grep -v "^#" >>"$known_hosts" || die "ssh-keyscan $BACKUP_SSH_HOST failed"
 fi
 
+# Offer the server only the host key types we have pinned (OpenSSH does the same by itself).
+# Go's ssh client otherwise negotiates e.g. rsa-sha2 while the file holds only the ed25519
+# line, and the pinned-key check fails with "knownhosts: key mismatch".
+# (|| true: -F exits 1 for the form that is absent, which set -e/pipefail would turn into a
+# silent exit of the whole script.)
+algos=$({ ssh-keygen -F "$BACKUP_SSH_HOST" -f "$known_hosts" || true
+          ssh-keygen -F "[$BACKUP_SSH_HOST]:$port" -f "$known_hosts" || true; } 2>/dev/null \
+        | awk '!/^#/ && NF >= 3 { t = $2;
+                                  if (t == "ssh-rsa") print "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"; else print t }' \
+        | tr ' ' '\n' | sort -u | tr '\n' ' ')
+[ -n "$algos" ] || die "no host key for $BACKUP_SSH_HOST:$port in $known_hosts"
+
 # rclone sftp backend configured from the environment; the remote is ":sftp:<path>".
 export RCLONE_SFTP_HOST="$BACKUP_SSH_HOST" RCLONE_SFTP_PORT="$port" RCLONE_SFTP_USER="${BACKUP_SSH_USER:-root}"
-export RCLONE_SFTP_KEY_FILE="$key" RCLONE_SFTP_KNOWN_HOSTS_FILE="$known_hosts"
+export RCLONE_SFTP_KEY_FILE="$key" RCLONE_SFTP_KNOWN_HOSTS_FILE="$known_hosts" RCLONE_SFTP_HOST_KEY_ALGORITHMS="$algos"
 # No remote shell commands at all (SFTP-only accounts), no hash checks (they need a shell).
 export RCLONE_SFTP_SHELL_TYPE=none RCLONE_SFTP_DISABLE_HASHCHECK=true
 export RCLONE_CONTIMEOUT=30s RCLONE_TIMEOUT=5m RCLONE_RETRIES=1 RCLONE_LOW_LEVEL_RETRIES=3 RCLONE_LOG_LEVEL=ERROR

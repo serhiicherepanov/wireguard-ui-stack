@@ -154,7 +154,11 @@ Services:
   `RCLONE_SFTP_SHELL_TYPE=none` and `DISABLE_HASHCHECK` keep rclone from trying; mkdir,
   rename (`moveto`), listing (`lsf`) and delete all go through SFTP. The host key is pinned
   via `ssh-keyscan` into `backup/ssh/known_hosts` on first use because rclone verifies but
-  never adds. Job output goes to `/proc/1/fd/1` so it shows in
+  never adds. `RCLONE_SFTP_HOST_KEY_ALGORITHMS` is derived from the key types present in
+  that file for the host: Go's ssh client otherwise negotiates e.g. rsa-sha2 against a file
+  holding only the ed25519 line and fails with "knownhosts: key mismatch" (OpenSSH narrows
+  the algorithms by itself, Go does not). scp is not an option: no stdin streaming, no
+  rename/list/delete. Job output goes to `/proc/1/fd/1` so it shows in
   `docker compose logs backup` (ofelia only buffers it otherwise). Archive name:
   `${BACKUP_NAME}_$(date +%Y%m%d_%H%M%S).tgz` in `TZ`.
 
