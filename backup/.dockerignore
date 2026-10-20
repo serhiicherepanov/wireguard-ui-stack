@@ -1,0 +1,4 @@
+# Only the two scripts go into the image; the SSH key dir is mounted at runtime.
+*
+!entrypoint.sh
+!backup.sh

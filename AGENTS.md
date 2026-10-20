@@ -17,6 +17,12 @@ and so does **Seafile** (the official `seafileltd/seafile-mc` image is the runti
 - `docker-compose.yaml` — base stack, no reverse proxy. Always required.
 - `docker-compose.traefik.yaml` — optional overlay adding Traefik and the routing labels.
   Enabled via `COMPOSE_FILE=docker-compose.yaml:docker-compose.traefik.yaml` in `.env`.
+- `docker-compose.backup.yaml` — optional overlay adding the `backup` container (ofelia):
+  nightly `.tgz` of the whole project directory streamed over SSH. Enabled the same way
+  (`…:docker-compose.backup.yaml`).
+- `backup/` — `Dockerfile` (ofelia + openssh-client + GNU tar + mariadb-client),
+  `entrypoint.sh` (renders ofelia's INI from `BACKUP_SCHEDULE`, starts the daemon),
+  `backup.sh` (the job). `backup/ssh/` holds the private key and `known_hosts` (gitignored).
 - `Dockerfile` + `.dockerignore` + `entrypoint.sh` — builds the fork from git at `WGUI_FORK_REF`
   and layers it onto the Seafile image (`SEAFILE_IMAGE`). `entrypoint.sh` is the `wireguard-ui`
   runit service inside that image.
@@ -38,6 +44,7 @@ Services:
 | `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | The WireGuard tunnel (`wg-quick up` on start), the UI (:5000, container-internal, under `$WGUI_BASE_PATH`) **and** Seafile, all behind one nginx on :80 (`/` → seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes exactly two ports: `$WG_PORT/udp` and nginx on `$HTTP_BIND:$HTTP_PORT` (default `127.0.0.1:5000`). Traefik reaches :80 over the bridge. |
 | `seafile-db`   | `mariadb:10.11`              | base    | Seafile database, `internal` network only. |
 | `seafile-memcached` | `memcached:1.6`         | base    | Seafile cache, `internal` network only, alias `memcached`. |
+| `backup`       | `wireguard-ui-stack-backup:local` (built locally from `backup/`) | overlay (`docker-compose.backup.yaml`) | ofelia `job-local` on `$BACKUP_SCHEDULE`: `mariadb-dump` of the Seafile DBs into `seafile/dump/`, then `tar -czf - .` of the project dir (mounted `.:/src:ro`) piped to `ssh … 'cat > name_yyyymmdd_hhmmss.tgz.part'`, renamed when complete, optional remote retention (`BACKUP_KEEP`). Networks `default` (egress) + `seafile` (DB). No docker socket. |
 | `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. One router: `Host($WG_HOST)` (and `$SEAFILE_HOST` if set) → container nginx :80. |
 
 ## Non-obvious design decisions — do not "fix" these
@@ -132,6 +139,18 @@ Services:
   `wireguard/config/{server,templates,coredns}` are dead leftovers of linuxserver/wireguard.
 - The host kernel must provide the `wireguard` module (mainline since 5.6). The container does
   not modprobe anything.
+- **Backup is an overlay, configured by INI not labels, and dumps the DB first.** The `backup`
+  container renders `/etc/ofelia/config.ini` from `BACKUP_SCHEDULE` in its entrypoint instead
+  of using `ofelia.*` docker labels, so it needs no docker socket (it holds an SSH key to an
+  external host; keep its reach small). It is not in the base file because it needs an SSH
+  target and would fail nightly without one. The image is tiny and built on the server
+  (`pull_policy: build`), not in CI. `backup.sh` runs `mariadb-dump --skip-ssl` (the 11.x
+  client demands TLS by default; `seafile-db` has none) into `seafile/dump/` before archiving,
+  because a tar of the live `seafile/db` is not restorable on its own. The archive is streamed
+  (`tar | ssh`), written as `.part` and renamed at the end; GNU tar exit 1 (file changed
+  while reading) is accepted, 2 is a failure. Job output goes to `/proc/1/fd/1` so it shows in
+  `docker compose logs backup` (ofelia only buffers it otherwise). Archive name:
+  `${BACKUP_NAME}_$(date +%Y%m%d_%H%M%S).tgz` in `TZ`.
 
 ## Configuration
 
@@ -155,6 +174,9 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
   `/wg`). A separate value must also resolve to this host. First-run default (see above).
 - `SEAFILE_DB_ROOT_PASSWORD`, `SEAFILE_ADMIN_EMAIL`, `SEAFILE_ADMIN_PASSWORD` — MariaDB root
   and the initial Seafile admin. First-run defaults.
+- `BACKUP_SSH_HOST/PORT/USER/KEY`, `BACKUP_REMOTE_DIR`, `BACKUP_NAME`, `BACKUP_SCHEDULE`
+  (ofelia cron, seconds first), `BACKUP_KEEP` (0 = keep all), `BACKUP_EXCLUDE`,
+  `BACKUP_DB_DUMP` — the backup overlay. The key file lives in `backup/ssh/`.
 - `SEAFILE_IMAGE` — runtime base image (default `seafileltd/seafile-mc:11.0-latest`).
   Seafile upgrades between minor versions are handled by the image's own `upgrade.py` on start;
   read the Seafile manual before bumping a major.
@@ -169,6 +191,8 @@ All configuration is in `.env` (gitignored). `.env.example` lists every variable
   the DB user password and secret key), `seafile/seafile-data/` (library blocks), `seahub-data/`,
   logs, `nginx/conf/seafile.nginx.conf`. Source of truth for Seafile together with the DB.
 - `seafile/db/` — MariaDB data dir (`ccnet_db`, `seafile_db`, `seahub_db`).
+- `seafile/dump/seafile-db.sql.gz` — written by the backup job before each archive. Regenerable.
+- `backup/ssh/` — private key and `known_hosts` of the backup job.
 
 ## Common tasks
 
@@ -185,17 +209,23 @@ docker compose exec wireguard curl -sI http://127.0.0.1/            # Seafile up
 docker compose exec wireguard curl -sI http://127.0.0.1/wg/login    # UI via nginx (200)
 docker compose exec wireguard grep -E '^(SERVICE_URL|FILE_SERVER_ROOT|CSRF_TRUSTED)' /shared/seafile/conf/seahub_settings.py
 docker compose logs -f wireguard                      # Seafile + UI + wg-quick, one stream
+docker compose exec backup backup.sh                  # run a backup now (backup overlay)
+docker compose logs -f backup                         # ofelia schedule + job output
 ```
 
 ## Rules for agents
 
-- After touching either compose file, validate both variants:
-  `docker compose -f docker-compose.yaml config -q` and `docker compose config -q`.
+- After touching any compose file, validate the variants:
+  `docker compose -f docker-compose.yaml config -q`, `docker compose config -q`, and
+  `BACKUP_SSH_HOST=x BACKUP_REMOTE_DIR=/x docker compose -f docker-compose.yaml -f docker-compose.backup.yaml config -q`.
+- After touching `backup/`, run `docker build backup/` and one real `backup.sh` run (a
+  throwaway sshd + mariadb container pair is enough; check the name, the dump inside the
+  archive, `.part` cleanup and `BACKUP_KEEP`).
 - After touching `Dockerfile`, run `docker compose -f docker-compose.yaml build`. After touching
   the `build:` section or the workflow, also dry-run what CI will do:
   `SEAFILE_HOST=x SEAFILE_DB_ROOT_PASSWORD=x SEAFILE_ADMIN_PASSWORD=x docker buildx bake -f docker-compose.yaml --print wireguard`.
-- Never commit `.env`, `wireguard/`, `letsencrypt/` or `seafile/` contents. Never print secret
-  values from `.env`, `wireguard/ui/db/server/keypair.json` or `seafile/data/seafile/conf/`
+- Never commit `.env`, `wireguard/`, `letsencrypt/`, `seafile/` or `backup/ssh/` contents. Never print secret
+  values from `.env`, `wireguard/ui/db/server/keypair.json`, `backup/ssh/` or `seafile/data/seafile/conf/`
   into chat, logs, or commit messages.
 - Do not publish port 80 in the base file; Traefik reaches it over the bridge. Do not add a
   second Traefik router pointing at `:5000`; the UI is reached through nginx on purpose.

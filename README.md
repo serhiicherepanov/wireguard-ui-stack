@@ -20,6 +20,8 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
 - `docker-compose.traefik.yaml` — optional overlay: Traefik on host network, :80/:443,
   Let's Encrypt via HTTP-01 challenge, sends `https://$WG_HOST` to the container's nginx
   (Seafile at `/`, UI at `/wg`).
+- `docker-compose.backup.yaml` — optional overlay: nightly `.tgz` of this whole directory
+  uploaded over SSH (ofelia scheduler, see [Backup](#backup)).
 
 ## Services
 
@@ -113,6 +115,41 @@ set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
   to stop the stack, delete `seafile/data` and `seafile/db`, and start again.
 - Clients (desktop sync, mobile) use `https://$WG_HOST`.
 
+## Backup
+
+`docker-compose.backup.yaml` adds a `backup` container (ofelia + ssh/tar/mariadb-dump, built
+from `backup/`) that once a day archives **this whole directory** (`.env`, `wireguard/`,
+`seafile/`, `letsencrypt/`, …) and streams it over SSH to
+
+```
+$BACKUP_SSH_HOST:$BACKUP_REMOTE_DIR/${BACKUP_NAME}_yyyymmdd_hhmmss.tgz
+```
+
+Before archiving it dumps the Seafile databases into `seafile/dump/seafile-db.sql.gz`, so the
+archive holds a restorable copy (the raw `seafile/db` files are copied too but are being
+written to). The archive never touches the local disk (`tar | ssh`), is written as `.part`
+and renamed when complete, and `BACKUP_KEEP` prunes old archives on the remote.
+
+```
+ssh-keygen -t ed25519 -N '' -f backup/ssh/id_ed25519   # add the .pub on the backup host
+# .env: add :docker-compose.backup.yaml to COMPOSE_FILE, set BACKUP_* (see .env.example)
+docker compose up -d backup
+docker compose exec backup backup.sh                   # run one backup now
+docker compose logs -f backup                          # scheduler + job output
+```
+
+`BACKUP_SCHEDULE` is an ofelia cron spec with seconds first (`0 30 3 * * *` = 03:30, in `TZ`).
+The host key is accepted on first contact and pinned in `backup/ssh/known_hosts`.
+
+Restore: stop the stack, unpack the archive over the directory, then (if `seafile/db` is not
+usable) start only `seafile-db` and feed `seafile/dump/seafile-db.sql.gz` to it:
+
+```
+docker compose up -d seafile-db
+gunzip -c seafile/dump/seafile-db.sql.gz | docker compose exec -T seafile-db mariadb -uroot -p"$SEAFILE_DB_ROOT_PASSWORD"
+docker compose up -d
+```
+
 ## How changes are applied
 
 - Container start/stop: `wg-quick up/down` (`WGUI_MANAGE_START=true`).
@@ -139,7 +176,9 @@ docker compose pull wireguard && docker compose up -d
 - `wireguard/ui/db` — UI users, clients, server keypair, settings. **Source of truth.**
 - `wireguard/config/wg_confs/wg0.conf` — rendered by the UI, read by wg-quick.
 - `letsencrypt/acme.json` — certificates (must be mode 600)
-- `seafile/data` — Seafile config, libraries, logs; `seafile/db` — MariaDB data
+- `seafile/data` — Seafile config, libraries, logs; `seafile/db` — MariaDB data;
+  `seafile/dump` — DB dump written by the backup job
+- `backup/ssh` — SSH key and `known_hosts` of the backup job
 
 All of these are gitignored.
 

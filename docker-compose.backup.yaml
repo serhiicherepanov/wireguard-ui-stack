@@ -1,0 +1,53 @@
+# Optional overlay: nightly backup of the whole project directory (this folder: .env, the UI DB,
+# wg0.conf, seafile/, letsencrypt/, ...) as one .tgz uploaded over SSH.
+#   <BACKUP_REMOTE_DIR>/<BACKUP_NAME>_<yyyymmdd>_<hhmmss>.tgz
+# Scheduler: ofelia (job-local) in a small image built from ./backup. The archive is streamed
+# (tar | ssh), so no local disk space is needed; before it, the Seafile databases are dumped
+# into seafile/dump/ so the archive holds a restorable copy next to the raw seafile/db files.
+# Usage: add :docker-compose.backup.yaml to COMPOSE_FILE in .env, set BACKUP_* there, put the
+# private key into backup/ssh/ (see .env.example). Run once by hand:
+#   docker compose exec backup backup.sh
+
+services:
+  backup:
+    build: ./backup
+    image: ${BACKUP_IMAGE:-wireguard-ui-stack-backup:local}
+    # Rebuilt by `docker compose up` whenever backup/ changes; it is not published to GHCR.
+    pull_policy: build
+    container_name: wg-backup
+    restart: always
+    environment:
+      - TZ=${TZ:-Asia/Tbilisi}
+      # ofelia schedule, 6 fields with seconds first: "0 30 3 * * *" = 03:30 every day.
+      - BACKUP_SCHEDULE=${BACKUP_SCHEDULE:-0 30 3 * * *}
+      - BACKUP_NAME=${BACKUP_NAME:-wireguard-ui-stack}
+      - BACKUP_SSH_HOST=${BACKUP_SSH_HOST:?set BACKUP_SSH_HOST in .env}
+      - BACKUP_SSH_PORT=${BACKUP_SSH_PORT:-22}
+      - BACKUP_SSH_USER=${BACKUP_SSH_USER:-root}
+      # File name inside backup/ssh/ (mounted at /ssh).
+      - BACKUP_SSH_KEY=${BACKUP_SSH_KEY:-id_ed25519}
+      - BACKUP_REMOTE_DIR=${BACKUP_REMOTE_DIR:?set BACKUP_REMOTE_DIR in .env}
+      # Newest N archives to keep on the remote; 0 = keep everything.
+      - BACKUP_KEEP=${BACKUP_KEEP:-0}
+      # Paths relative to the project dir to leave out of the archive, space separated.
+      - BACKUP_EXCLUDE=${BACKUP_EXCLUDE:-}
+      # mariadb-dump of ccnet_db/seafile_db/seahub_db into seafile/dump/ before archiving.
+      - BACKUP_DB_DUMP=${BACKUP_DB_DUMP:-true}
+      - DB_HOST=seafile-db
+      - MYSQL_PWD=${SEAFILE_DB_ROOT_PASSWORD:?set SEAFILE_DB_ROOT_PASSWORD in .env}
+    volumes:
+      # The whole project directory, read-only: this is what gets archived.
+      - .:/src:ro
+      # DB dump target (inside the project dir, hence inside the archive).
+      - ./seafile/dump:/dump
+      # Private key (+ known_hosts, written on first contact).
+      - ./backup/ssh:/ssh
+    networks:
+      # default: egress to the backup host; seafile: reach seafile-db for the dump.
+      - default
+      - seafile
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
