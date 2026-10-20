@@ -21,7 +21,7 @@ Two compose files (one service `wireguard` = tunnel + UI + Seafile, container na
   Let's Encrypt via HTTP-01 challenge, sends `https://$WG_HOST` to the container's nginx
   (Seafile at `/`, UI at `/wg`).
 - `docker-compose.backup.yaml` — optional overlay: nightly `.tgz` of this whole directory
-  uploaded over SSH (ofelia scheduler, see [Backup](#backup)).
+  uploaded over SFTP (ofelia scheduler, see [Backup](#backup)).
 
 ## Services
 
@@ -117,9 +117,9 @@ set `SEAFILE_FORCE_HTTPS=true` in `.env` before the first start.
 
 ## Backup
 
-`docker-compose.backup.yaml` adds a `backup` container (ofelia + ssh/tar/mariadb-dump, built
-from `backup/`) that once a day archives **this whole directory** (`.env`, `wireguard/`,
-`seafile/`, `letsencrypt/`, …) and streams it over SSH to
+`docker-compose.backup.yaml` adds a `backup` container (ofelia + rclone/tar/mariadb-dump,
+built from `backup/`) that once a day archives **this whole directory** (`.env`, `wireguard/`,
+`seafile/`, `letsencrypt/`, …) and streams it over SFTP to
 
 ```
 $BACKUP_SSH_HOST:$BACKUP_REMOTE_DIR/${BACKUP_NAME}_yyyymmdd_hhmmss.tgz
@@ -127,8 +127,10 @@ $BACKUP_SSH_HOST:$BACKUP_REMOTE_DIR/${BACKUP_NAME}_yyyymmdd_hhmmss.tgz
 
 Before archiving it dumps the Seafile databases into `seafile/dump/seafile-db.sql.gz`, so the
 archive holds a restorable copy (the raw `seafile/db` files are copied too but are being
-written to). The archive never touches the local disk (`tar | ssh`), is written as `.part`
-and renamed when complete, and `BACKUP_KEEP` prunes old archives on the remote.
+written to). The archive never touches the local disk (`tar | rclone rcat`), is written as
+`.part` and renamed when complete, and `BACKUP_KEEP` prunes old archives on the remote.
+Only the SFTP subsystem is used (no remote shell), so SFTP-only accounts such as a Hetzner
+Storage Box work; any SSH server with SFTP works too.
 
 ```
 ssh-keygen -t ed25519 -N '' -f backup/ssh/id_ed25519   # add the .pub on the backup host
@@ -139,7 +141,8 @@ docker compose logs -f backup                          # scheduler + job output
 ```
 
 `BACKUP_SCHEDULE` is an ofelia cron spec with seconds first (`0 30 3 * * *` = 03:30, in `TZ`).
-The host key is accepted on first contact and pinned in `backup/ssh/known_hosts`.
+The host key is fetched with `ssh-keyscan` on first contact and pinned in
+`backup/ssh/known_hosts`; later runs fail if it changes.
 
 Restore: stop the stack, unpack the archive over the directory, then (if `seafile/db` is not
 usable) start only `seafile-db` and feed `seafile/dump/seafile-db.sql.gz` to it:

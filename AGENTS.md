@@ -18,9 +18,9 @@ and so does **Seafile** (the official `seafileltd/seafile-mc` image is the runti
 - `docker-compose.traefik.yaml` — optional overlay adding Traefik and the routing labels.
   Enabled via `COMPOSE_FILE=docker-compose.yaml:docker-compose.traefik.yaml` in `.env`.
 - `docker-compose.backup.yaml` — optional overlay adding the `backup` container (ofelia):
-  nightly `.tgz` of the whole project directory streamed over SSH. Enabled the same way
+  nightly `.tgz` of the whole project directory streamed over SFTP. Enabled the same way
   (`…:docker-compose.backup.yaml`).
-- `backup/` — `Dockerfile` (ofelia + openssh-client + GNU tar + mariadb-client),
+- `backup/` — `Dockerfile` (ofelia + rclone + openssh-client + GNU tar + mariadb-client),
   `entrypoint.sh` (renders ofelia's INI from `BACKUP_SCHEDULE`, starts the daemon),
   `backup.sh` (the job). `backup/ssh/` holds the private key and `known_hosts` (gitignored).
 - `Dockerfile` + `.dockerignore` + `entrypoint.sh` — builds the fork from git at `WGUI_FORK_REF`
@@ -44,7 +44,7 @@ Services:
 | `wireguard`    | `ghcr.io/…/wireguard-ui-stack` (CI-built from `Dockerfile`) | base    | The WireGuard tunnel (`wg-quick up` on start), the UI (:5000, container-internal, under `$WGUI_BASE_PATH`) **and** Seafile, all behind one nginx on :80 (`/` → seahub/seaf-server, `$WGUI_BASE_PATH` → UI). `cap_add: NET_ADMIN`. Publishes exactly two ports: `$WG_PORT/udp` and nginx on `$HTTP_BIND:$HTTP_PORT` (default `127.0.0.1:5000`). Traefik reaches :80 over the bridge. |
 | `seafile-db`   | `mariadb:10.11`              | base    | Seafile database, `internal` network only. |
 | `seafile-memcached` | `memcached:1.6`         | base    | Seafile cache, `internal` network only, alias `memcached`. |
-| `backup`       | `wireguard-ui-stack-backup:local` (built locally from `backup/`) | overlay (`docker-compose.backup.yaml`) | ofelia `job-local` on `$BACKUP_SCHEDULE`: `mariadb-dump` of the Seafile DBs into `seafile/dump/`, then `tar -czf - .` of the project dir (mounted `.:/src:ro`) piped to `ssh … 'cat > name_yyyymmdd_hhmmss.tgz.part'`, renamed when complete, optional remote retention (`BACKUP_KEEP`). Networks `default` (egress) + `seafile` (DB). No docker socket. |
+| `backup`       | `wireguard-ui-stack-backup:local` (built locally from `backup/`) | overlay (`docker-compose.backup.yaml`) | ofelia `job-local` on `$BACKUP_SCHEDULE`: `mariadb-dump` of the Seafile DBs into `seafile/dump/`, then `tar -czf - .` of the project dir (mounted `.:/src:ro`) piped to `rclone rcat :sftp:…/name_yyyymmdd_hhmmss.tgz.part`, renamed when complete, optional remote retention (`BACKUP_KEEP`). SFTP subsystem only, no remote shell. Networks `default` (egress) + `seafile` (DB). No docker socket. |
 | `traefik`      | `traefik:v3.6`               | overlay | Reverse proxy on host network, :80 → :443 redirect, TLS via Let's Encrypt (HTTP-01 challenge on the `unsecure` entrypoint). Dashboard under `/traefik/dashboard/` behind basic auth. One router: `Host($WG_HOST)` (and `$SEAFILE_HOST` if set) → container nginx :80. |
 
 ## Non-obvious design decisions — do not "fix" these
@@ -147,8 +147,14 @@ Services:
   (`pull_policy: build`), not in CI. `backup.sh` runs `mariadb-dump --skip-ssl` (the 11.x
   client demands TLS by default; `seafile-db` has none) into `seafile/dump/` before archiving,
   because a tar of the live `seafile/db` is not restorable on its own. The archive is streamed
-  (`tar | ssh`), written as `.part` and renamed at the end; GNU tar exit 1 (file changed
-  while reading) is accepted, 2 is a failure. Job output goes to `/proc/1/fd/1` so it shows in
+  (`tar | rclone rcat`), written as `.part` and renamed at the end; GNU tar exit 1 (file
+  changed while reading) is accepted, 2 is a failure. **Upload is rclone's sftp backend, not
+  `ssh host 'cat > …'`**: the target may be an SFTP-only account ("This service allows sftp
+  connections only", e.g. Hetzner Storage Box), so nothing may run a remote shell command.
+  `RCLONE_SFTP_SHELL_TYPE=none` and `DISABLE_HASHCHECK` keep rclone from trying; mkdir,
+  rename (`moveto`), listing (`lsf`) and delete all go through SFTP. The host key is pinned
+  via `ssh-keyscan` into `backup/ssh/known_hosts` on first use because rclone verifies but
+  never adds. Job output goes to `/proc/1/fd/1` so it shows in
   `docker compose logs backup` (ofelia only buffers it otherwise). Archive name:
   `${BACKUP_NAME}_$(date +%Y%m%d_%H%M%S).tgz` in `TZ`.
 
@@ -219,8 +225,9 @@ docker compose logs -f backup                         # ofelia schedule + job ou
   `docker compose -f docker-compose.yaml config -q`, `docker compose config -q`, and
   `BACKUP_SSH_HOST=x BACKUP_REMOTE_DIR=/x docker compose -f docker-compose.yaml -f docker-compose.backup.yaml config -q`.
 - After touching `backup/`, run `docker build backup/` and one real `backup.sh` run (a
-  throwaway sshd + mariadb container pair is enough; check the name, the dump inside the
-  archive, `.part` cleanup and `BACKUP_KEEP`).
+  throwaway sshd with `ForceCommand internal-sftp` + a mariadb container is enough; check the
+  name, the dump inside the archive, `.part` cleanup and `BACKUP_KEEP`). It must keep working
+  without a remote shell.
 - After touching `Dockerfile`, run `docker compose -f docker-compose.yaml build`. After touching
   the `build:` section or the workflow, also dry-run what CI will do:
   `SEAFILE_HOST=x SEAFILE_DB_ROOT_PASSWORD=x SEAFILE_ADMIN_PASSWORD=x docker buildx bake -f docker-compose.yaml --print wireguard`.
